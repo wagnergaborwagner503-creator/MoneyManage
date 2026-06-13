@@ -1604,7 +1604,24 @@ window.addEventListener("beforeinstallprompt", (e) => {
   state.deferredInstall = e;
 });
 if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+  // Automatikus frissítés: új verziónál a SW azonnal átveszi (skipWaiting),
+  // és az oldal EGYSZER újratölt, hogy a friss kód jelenjen meg – telefonra telepített appban is.
+  const hadController = !!navigator.serviceWorker.controller;
+  let refreshing = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!hadController || refreshing) return; // első telepítéskor NE töltsön újra
+    refreshing = true;
+    location.reload();
+  });
+  window.addEventListener("load", async () => {
+    try {
+      const reg = await navigator.serviceWorker.register("sw.js");
+      reg.update();
+      // frissítés-ellenőrzés, amikor az app előtérbe kerül (telefonon ez a kulcs), és óránként
+      document.addEventListener("visibilitychange", () => { if (!document.hidden) reg.update().catch(() => {}); });
+      setInterval(() => reg.update().catch(() => {}), 60 * 60 * 1000);
+    } catch (e) {}
+  });
 }
 
 // ============ START ============

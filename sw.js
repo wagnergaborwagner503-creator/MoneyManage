@@ -1,5 +1,5 @@
 // MoneyManage service worker – offline shell cache
-const CACHE = "mm-cache-v6";
+const CACHE = "mm-cache-v7";
 const SHELL = [
   "./",
   "./index.html",
@@ -14,9 +14,15 @@ const SHELL = [
 ];
 
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
+  // friss fájlok a precache-be (a böngésző HTTP-cache megkerülésével)
+  e.waitUntil(caches.open(CACHE).then((c) => Promise.all(
+    SHELL.map((u) => c.add(new Request(u, { cache: "reload" })).catch(() => {}))
+  )));
   self.skipWaiting();
 });
+
+// kézi frissítés-kérés (ha a kliens üzen)
+self.addEventListener("message", (e) => { if (e.data === "skip") self.skipWaiting(); });
 
 self.addEventListener("activate", (e) => {
   e.waitUntil(
