@@ -33,6 +33,7 @@ body {
   color: var(--text);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden; /* biztonsági háló a vízszintes elcsúszás ellen */
 }
 
 .hidden { display: none !important; }
@@ -137,7 +138,8 @@ input, select, textarea { font-family: inherit; font-size: 16px; }
 .sidebar-user { font-size: 13px; color: var(--text-muted); word-break: break-all; }
 
 .main {
-  flex: 1; margin-left: var(--sidebar-w); padding: 0 28px 40px;
+  flex: 1; min-width: 0; /* flex-gyermek: enged a viewportnak (nem tágul a tartalom min-content szélességére) */
+  margin-left: var(--sidebar-w); padding: 0 28px 40px;
   max-width: 1100px;
 }
 
@@ -163,14 +165,16 @@ input, select, textarea { font-family: inherit; font-size: 16px; }
 .card {
   background: var(--card); border-radius: var(--radius); padding: 20px;
   box-shadow: var(--shadow); border: 1px solid var(--border); margin-bottom: 16px;
+  min-width: 0; /* grid/flex gyermekként ne táguljon a tartalomtól */
 }
+.card-title { min-width: 0; }
 .card-title {
   font-size: 15px; font-weight: 700; margin-bottom: 14px;
   display: flex; align-items: center; justify-content: space-between;
 }
 .card-title .btn-link { margin: 0; }
 
-.stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 16px; }
+.stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 16px; }
 .stat-card {
   background: var(--card); border-radius: var(--radius); padding: 18px;
   box-shadow: var(--shadow); border: 1px solid var(--border);
@@ -223,10 +227,35 @@ input, select, textarea { font-family: inherit; font-size: 16px; }
 .tx-amount.income { color: var(--green); }
 .tx-amount.saving { color: var(--blue-600); }
 
+/* Tervezett (pending) tételek */
+.tx-item.pending { border-style: dashed; background: var(--amber-bg); }
+.tx-item.pending .tx-amount { opacity: .8; }
+.tx-badge {
+  display: inline-block; font-size: 10px; font-weight: 700; color: var(--amber);
+  background: #fff; border: 1px solid #fde68a; padding: 1px 6px; border-radius: 6px;
+  margin-left: 6px; vertical-align: middle; white-space: nowrap;
+}
+.tx-complete {
+  width: 32px; height: 32px; flex-shrink: 0; border-radius: 9px;
+  border: 1.5px solid var(--green); background: var(--green-bg); color: var(--green);
+  font-size: 15px; font-weight: 700; transition: all .15s;
+}
+.tx-complete:hover { background: var(--green); color: #fff; }
+
+/* Ismétlődés gyakoriság-választó + jelölőnégyzet sor */
+.check-row { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; cursor: pointer; }
+.check-row input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--blue-600); flex-shrink: 0; }
+.freq-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.freq-lbl { font-size: 15px; color: var(--text-muted); font-weight: 500; }
+.freq-count { width: 80px; text-align: center; padding: 12px 10px; border: 1.5px solid var(--border); border-radius: 12px; font-size: 16px; font-weight: 600; }
+.freq-count:focus { outline: none; border-color: var(--blue-500); box-shadow: 0 0 0 3px var(--blue-100); }
+.freq-unit { flex: 1; padding: 12px 14px; border: 1.5px solid var(--border); border-radius: 12px; background: #fff; font-size: 16px; }
+.freq-unit:focus { outline: none; border-color: var(--blue-500); box-shadow: 0 0 0 3px var(--blue-100); }
+
 .filter-bar { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
 .filter-bar input, .filter-bar select {
   padding: 10px 12px; border: 1.5px solid var(--border); border-radius: 12px; background: #fff;
-  font-size: 14px; flex: 1; min-width: 120px;
+  font-size: 16px; flex: 1; min-width: 120px;
 }
 .filter-bar input:focus, .filter-bar select:focus { outline: none; border-color: var(--blue-500); }
 
@@ -310,7 +339,7 @@ input, select, textarea { font-family: inherit; font-size: 16px; }
 }
 .quick-amounts { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; justify-content: center; }
 
-.cat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.cat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .cat-pick {
   border: 1.5px solid var(--border); background: #fff; border-radius: 12px; padding: 10px 4px;
   display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: 11px;
@@ -362,7 +391,7 @@ input, select, textarea { font-family: inherit; font-size: 16px; }
 .empty-state p { font-size: 14px; }
 .section-title { font-size: 18px; font-weight: 800; margin: 8px 0 14px; letter-spacing: -0.3px; }
 
-.row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.row-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
 .list-edit-row {
   display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border);
 }
@@ -370,7 +399,7 @@ input, select, textarea { font-family: inherit; font-size: 16px; }
 .list-edit-row .lab { flex: 1; font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .list-edit-row input.inline-amount {
   width: 130px; padding: 8px 10px; border: 1.5px solid var(--border); border-radius: 10px;
-  text-align: right; font-weight: 600; font-size: 14px;
+  text-align: right; font-weight: 600; font-size: 16px;
 }
 .list-edit-row input.inline-amount:focus { outline: none; border-color: var(--blue-500); }
 .icon-btn {
@@ -397,11 +426,13 @@ input, select, textarea { font-family: inherit; font-size: 16px; }
 @media (max-width: 900px) {
   .sidebar { display: none; }
   .mobile-only { display: inline-flex; align-items: center; justify-content: center; }
+  /* iOS Safari ne zoomoljon rá az inputra fókuszkor (a ≥16px ezt megakadályozza) */
+  input:not([type="checkbox"]):not([type="radio"]), select, textarea { font-size: 16px; }
   .main { margin-left: 0; padding: 0 16px 40px; }
   .bottom-nav { display: flex; }
-  .stat-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .stat-card .stat-value { font-size: 20px; }
-  .row-2 { grid-template-columns: 1fr; }
+  .row-2 { grid-template-columns: minmax(0, 1fr); }
   .topbar { padding-top: 12px; }
 }
 @media (min-width: 901px) {

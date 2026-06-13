@@ -5,13 +5,21 @@ Telefonra telepíthető webalkalmazás (PWA) a havi pénzügyeid tervezéséhez 
 **Funkciók:**
 - 📋 Havi költségvetés tervezése kategóriánként (keretek + túlköltés-jelzés)
 - 🧾 Kiadások / bevételek / megtakarítások rögzítése okos bevitellel („12k" = 12 000 Ft, kategória-javaslat a megnevezés alapján, gyorsösszeg gombok)
-- 🔁 Ismétlődő havi tételek (fizetés, albérlet, előfizetések) automatikus könyveléssel
+- 🔁 Ismétlődő tételek tetszőleges gyakorisággal: naponta / hetente / havonta / évente, sőt „3 hetente" is – automatikus könyveléssel
 - 🎯 Hosszú távú célok célösszeggel és határidővel – kiszámolja, mennyit kell havonta félretenned
 - 🔮 Hó végi előrejelzés: a jelenlegi költési tempód alapján megmondja, mennyi marad
+- 🗓️ Jövőbeli (tervezett) tételek: a hó végi egyenlegbe beleszámítanak, a statisztikába még nem – egy ✓ gombbal jelölheted teljesítettnek
 - 📊 Statisztikák: kategória-megoszlás, 6 havi trend, halmozott napi költés összevetése az előző hónappal, átlagok, top kiadások
+- 💬 Visszajelzés-küldés (a Supabase `feedback` tábláján keresztül)
 - ☁️ Teljes regisztrációs/bejelentkezős rendszer (Supabase) – az adataid minden eszközödön elérhetők
 - 📱 Helyi mód fiók nélkül is (localStorage)
 - ⬇️ CSV export, offline működés, telepíthető Androidra/iPhone-ra/PC-re
+
+---
+
+## 🔄 FONTOS – frissítés után futtasd újra a sémát (v1.1)
+
+Ha már korábban beállítottad a Supabase-t, az új funkciókhoz (tetszőleges ismétlődési gyakoriság + jövőbeli/tervezett tételek) **új adatbázis-oszlopok kellenek**. Nyisd meg a **Supabase Dashboard → SQL Editor → New query**, másold be újra a **`supabase/schema.sql`** teljes tartalmát, és kattints **Run**. A fájl idempotens (az `add column if not exists` / `drop policy if exists` miatt hibamentesen újrafuttatható), tehát nyugodtan lefuttathatod akárhányszor – a meglévő adataid megmaradnak.
 
 ---
 

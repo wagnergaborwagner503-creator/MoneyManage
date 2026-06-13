@@ -41,6 +41,50 @@ function txOfMonth(d = state.month) {
 function sumBy(list, type) {
   return list.filter(t => t.type === type).reduce((s, t) => s + Number(t.amount || 0), 0);
 }
+
+// ---------- Jövőbeli / tervezett (pending) tételek ----------
+const today0 = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; };
+const isoDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const isFutureDate = (str) => new Date(str + "T00:00:00") > today0();
+const isPending = (t) => t.pending === true || t.pending === "true";
+// "realized" = teljesített tételek (ezek számítanak a statisztikába); a pending kimarad
+const realized = (list) => list.filter(t => !isPending(t));
+const realizedOfMonth = (d = state.month) => realized(txOfMonth(d));
+
+// ---------- Ismétlődés: n-edik előfordulás dátuma a horgonytól számolva ----------
+function occurrenceDate(anchor, unit, count, n) {
+  const a = anchor;
+  if (unit === "day")  { const d = new Date(a); d.setDate(a.getDate() + count * n); return d; }
+  if (unit === "week") { const d = new Date(a); d.setDate(a.getDate() + count * 7 * n); return d; }
+  if (unit === "year") {
+    const y = a.getFullYear() + count * n;
+    const dim = new Date(y, a.getMonth() + 1, 0).getDate();
+    return new Date(y, a.getMonth(), Math.min(a.getDate(), dim));
+  }
+  // month (alapértelmezett)
+  const total = a.getMonth() + count * n;
+  const y = a.getFullYear() + Math.floor(total / 12);
+  const m = ((total % 12) + 12) % 12;
+  const dim = new Date(y, m + 1, 0).getDate();
+  return new Date(y, m, Math.min(a.getDate(), dim));
+}
+function recurringAnchor(r) {
+  if (r.anchor_date) return new Date(r.anchor_date.slice(0, 10) + "T00:00:00");
+  if (r.day) { // régi rekord: havi, adott napon – ettől a hónaptól indul
+    const t = new Date();
+    const dim = daysInMonth(t);
+    return new Date(t.getFullYear(), t.getMonth(), Math.min(Number(r.day), dim));
+  }
+  if (r.created_at) { const d = new Date(r.created_at); d.setHours(0, 0, 0, 0); return d; }
+  return today0();
+}
+function freqText(r) {
+  const c = Math.max(1, Number(r.interval_count || 1));
+  const u = r.interval_unit || "month";
+  if (c === 1) return { day: "naponta", week: "hetente", month: "havonta", year: "évente" }[u];
+  return { day: `${c} naponta`, week: `${c} hetente`, month: `${c} havonta`, year: `${c} évente` }[u];
+}
+
 function catById(id) { return state.cache.categories.find(c => c.id === id); }
 function goalById(id) { return state.cache.goals.find(g => g.id === id); }
 function goalSaved(goal) {
@@ -63,21 +107,38 @@ async function refreshCache() {
 }
 
 // ---------- Ismétlődő tételek automatikus könyvelése ----------
+// A horgonytól (anchor_date) indulva minden esedékes (mai vagy korábbi) előfordulást
+// pontos dátum szerint könyvel. A dedup a (recurring_id + dátum) páron alapul,
+// így egy adott előfordulás SOHA nem kerül be kétszer – frissítéskor sem.
 async function applyRecurring() {
-  const now = new Date();
-  const key = monthKey(now);
+  const today = today0();
+  // Helyi munkapéldány, hogy a cikluson belül felvett tételeket is lássa a dedup
+  const booked = new Set(
+    state.cache.transactions
+      .filter(t => t.recurring_id)
+      .map(t => t.recurring_id + "|" + (t.date || "").slice(0, 10))
+  );
   let added = 0;
   for (const r of state.cache.recurring) {
     if (!r.active) continue;
-    const day = Math.min(Number(r.day || 1), daysInMonth(now));
-    if (now.getDate() < day) continue; // még nem jött el a napja
-    const exists = state.cache.transactions.some(t => t.recurring_id === r.id && (t.date || "").startsWith(key));
-    if (exists) continue;
-    await state.store.insert("transactions", {
-      type: r.type, amount: r.amount, category_id: r.category_id || null,
-      note: r.name, date: `${key}-${String(day).padStart(2, "0")}`, recurring_id: r.id,
-    });
-    added++;
+    const unit = r.interval_unit || "month";
+    const count = Math.max(1, Number(r.interval_count || 1));
+    const anchor = recurringAnchor(r);
+    if (!anchor || isNaN(anchor)) continue;
+    for (let n = 0, guard = 0; guard < 1000; n++, guard++) {
+      const occ = occurrenceDate(anchor, unit, count, n);
+      occ.setHours(0, 0, 0, 0);
+      if (occ > today) break;          // jövőbeli előfordulást még nem könyvelünk
+      const occStr = isoDate(occ);
+      const dedupKey = r.id + "|" + occStr;
+      if (booked.has(dedupKey)) continue;
+      booked.add(dedupKey);
+      await state.store.insert("transactions", {
+        type: r.type, amount: r.amount, category_id: r.category_id || null,
+        note: r.name, date: occStr, recurring_id: r.id, pending: false,
+      });
+      added++;
+    }
   }
   if (added) {
     await refreshCache();
@@ -229,11 +290,20 @@ function renderView() {
 
 // ============ ÁTTEKINTÉS (Dashboard) ============
 function renderDashboard(el) {
-  const tx = txOfMonth();
-  const income = sumBy(tx, "income");
-  const expense = sumBy(tx, "expense");
-  const saving = sumBy(tx, "saving");
-  const balance = income - expense - saving;
+  const txAll = txOfMonth();
+  const txReal = realized(txAll);
+  // Teljesített (realized) – ez megy a Bevétel/Kiadás kártyákra és a keretekbe
+  const incomeR = sumBy(txReal, "income");
+  const expenseR = sumBy(txReal, "expense");
+  const savingR = sumBy(txReal, "saving");
+  // Tervezettel együtt (pending is) – ez a "Hó végén marad"
+  const incomeAll = sumBy(txAll, "income");
+  const expenseAll = sumBy(txAll, "expense");
+  const savingAll = sumBy(txAll, "saving");
+  const balance = incomeAll - expenseAll - savingAll;
+  const pendingCount = txAll.filter(isPending).length;
+  const plannedExpense = expenseAll - expenseR;
+  const plannedIncome = incomeAll - incomeR;
 
   const now = new Date();
   const dim = daysInMonth(state.month);
@@ -245,17 +315,20 @@ function renderDashboard(el) {
       <div class="stat-value blue">${fmt(daily)}</div>
       <div class="stat-sub">még ${daysLeft} napra elosztva</div></div>`;
     const elapsed = now.getDate();
-    const projected = elapsed > 0 ? (expense / elapsed) * dim : 0;
-    const projBalance = income - projected - saving;
+    const projected = elapsed > 0 ? (expenseR / elapsed) * dim : 0;
+    const projBalance = incomeAll - projected - savingAll;
     projHtml = `<div class="banner ${projBalance < 0 ? "warn" : "info"}">
       🔮 <b>Hó végi előrejelzés:</b> a jelenlegi tempóban kb. <b>${fmt(projected)}</b> lesz az összes kiadásod,
       így várhatóan <b>${fmt(projBalance)}</b> marad a hónap végén.</div>`;
   }
 
-  // Költségkeretek állapota
+  // Tervezett (pending) tételek tájékoztató
+  const pendingBanner = pendingCount ? `<div class="banner info">🗓️ <b>${pendingCount} tervezett tétel</b> ebben a hónapban – a hó végi egyenlegbe beleszámítanak, a statisztikába még nem. A <b>Tételek</b> fülön pipáld ki őket (✓), amint megtörténtek.</div>` : "";
+
+  // Költségkeretek állapota (csak a teljesített kiadások töltik)
   const budgetCats = state.cache.categories.filter(c => Number(c.budget) > 0);
   const spentByCat = {};
-  tx.filter(t => t.type === "expense").forEach(t => {
+  txReal.filter(t => t.type === "expense").forEach(t => {
     spentByCat[t.category_id] = (spentByCat[t.category_id] || 0) + Number(t.amount);
   });
   const budgetRows = budgetCats.map(c => {
@@ -271,8 +344,8 @@ function renderDashboard(el) {
     </div>`;
   }).join("");
 
-  // Utolsó tranzakciók
-  const recent = tx.slice(0, 5).map(txItemHtml).join("");
+  // Utolsó tranzakciók (tervezettel együtt – a legközelebbi/legfrissebb elöl)
+  const recent = txAll.slice(0, 6).map(txItemHtml).join("");
 
   // Célok mini
   const goalsMini = state.cache.goals.filter(g => !g.done).slice(0, 3).map(g => {
@@ -291,14 +364,17 @@ function renderDashboard(el) {
     <div class="stat-grid">
       <div class="stat-card highlight"><div class="stat-label">💰 Hó végén marad</div>
         <div class="stat-value">${fmt(balance)}</div>
-        <div class="stat-sub">bevétel − kiadás − megtakarítás</div></div>
+        <div class="stat-sub">${pendingCount ? "tervezett tételekkel együtt" : "bevétel − kiadás − megtakarítás"}</div></div>
       <div class="stat-card"><div class="stat-label">📈 Bevétel</div>
-        <div class="stat-value pos">${fmt(income)}</div></div>
+        <div class="stat-value pos">${fmt(incomeR)}</div>
+        ${plannedIncome ? `<div class="stat-sub">+ ${fmt(plannedIncome)} tervezett</div>` : ""}</div>
       <div class="stat-card"><div class="stat-label">📉 Kiadás</div>
-        <div class="stat-value neg">${fmt(expense)}</div></div>
+        <div class="stat-value neg">${fmt(expenseR)}</div>
+        ${plannedExpense ? `<div class="stat-sub">+ ${fmt(plannedExpense)} tervezett</div>` : ""}</div>
       ${dailyHtml || `<div class="stat-card"><div class="stat-label">🏦 Megtakarítás</div>
-        <div class="stat-value blue">${fmt(saving)}</div></div>`}
+        <div class="stat-value blue">${fmt(savingR)}</div></div>`}
     </div>
+    ${pendingBanner}
     ${projHtml}
     <div class="row-2">
       <div class="card">
@@ -313,10 +389,7 @@ function renderDashboard(el) {
     ${goalsMini ? `<div class="card"><div class="card-title">Céljaid <button class="btn-link" data-goto="goals">Összes ›</button></div>${goalsMini}</div>` : ""}
   `;
   el.querySelectorAll("[data-goto]").forEach(b => b.onclick = () => switchView(b.dataset.goto));
-  el.querySelectorAll("[data-txid]").forEach(item => item.onclick = () => {
-    const t = state.cache.transactions.find(x => x.id === item.dataset.txid);
-    if (t) openTxModal(t);
-  });
+  bindTxItems(el);
 }
 
 function txItemHtml(t) {
@@ -326,11 +399,28 @@ function txItemHtml(t) {
   const bg = t.type === "income" ? "var(--green-bg)" : t.type === "saving" ? "var(--blue-50)" : (cat?.color ? cat.color + "1a" : "var(--bg)");
   const sub = t.type === "income" ? "Bevétel" : t.type === "saving" ? `Megtakarítás${goal ? " → " + esc(goal.name) : ""}` : (cat?.name || "Egyéb");
   const sign = t.type === "income" ? "+" : "−";
-  return `<div class="tx-item" data-txid="${t.id}">
+  const pending = isPending(t);
+  const badge = pending ? `<span class="tx-badge">⏳ tervezett</span>` : "";
+  const completeBtn = pending ? `<button class="tx-complete" data-complete="${t.id}" title="Megjelölés teljesítettként">✓</button>` : "";
+  return `<div class="tx-item ${pending ? "pending" : ""}" data-txid="${t.id}">
     <div class="tx-ico" style="background:${bg}">${ico}</div>
-    <div class="tx-info"><div class="tx-name">${esc(t.note) || sub}</div><div class="tx-cat">${sub}${t.recurring_id ? " · 🔁" : ""}</div></div>
+    <div class="tx-info"><div class="tx-name">${esc(t.note) || sub}</div><div class="tx-cat">${sub}${t.recurring_id ? " · 🔁" : ""}${badge}</div></div>
+    ${completeBtn}
     <div class="tx-amount ${t.type}">${sign} ${fmt(t.amount)}</div>
   </div>`;
+}
+
+// Közös eseménykötő a tételsorokhoz: kattintásra szerkesztés, ✓-re teljesítettnek jelölés
+function bindTxItems(scope) {
+  scope.querySelectorAll("[data-complete]").forEach(b => b.onclick = async (e) => {
+    e.stopPropagation();
+    await state.store.update("transactions", b.dataset.complete, { pending: false });
+    await refreshCache(); renderView(); toast("Tétel teljesítve ✓");
+  });
+  scope.querySelectorAll("[data-txid]").forEach(item => item.onclick = () => {
+    const t = state.cache.transactions.find(x => x.id === item.dataset.txid);
+    if (t) openTxModal(t);
+  });
 }
 
 // ============ TRANZAKCIÓK ============
@@ -372,18 +462,12 @@ function renderTransactions(el) {
   `;
   const rerender = () => {
     $("#tx-list").innerHTML = listHtml();
-    bindTxClicks();
+    bindTxItems(el);
   };
-  function bindTxClicks() {
-    el.querySelectorAll("[data-txid]").forEach(item => item.onclick = () => {
-      const t = state.cache.transactions.find(x => x.id === item.dataset.txid);
-      if (t) openTxModal(t);
-    });
-  }
   $("#tx-search").oninput = (e) => { search = e.target.value; rerender(); };
   $("#tx-filter-type").onchange = (e) => { filterType = e.target.value; rerender(); };
   $("#tx-filter-cat").onchange = (e) => { filterCat = e.target.value; rerender(); };
-  bindTxClicks();
+  bindTxItems(el);
 }
 
 // ============ KÖLTSÉGVETÉS ============
@@ -404,7 +488,7 @@ function renderBudget(el) {
     const cat = catById(r.category_id);
     return `<div class="list-edit-row">
       <span class="lab">${r.type === "income" ? "💵" : (cat?.icon || "📦")} ${esc(r.name)}
-        <small style="color:var(--text-muted);font-weight:400">· ${r.day}. nap · ${r.type === "income" ? "bevétel" : "kiadás"}</small></span>
+        <small style="color:var(--text-muted);font-weight:400">· ${freqText(r)} · ${r.type === "income" ? "bevétel" : "kiadás"}${r.active === false ? " · ⏸ szünetel" : ""}</small></span>
       <b style="font-size:14px">${fmt(r.amount)}</b>
       <button class="icon-btn" data-delrec="${r.id}" title="Törlés">🗑</button>
     </div>`;
@@ -425,7 +509,7 @@ function renderBudget(el) {
     <div class="card">
       <div class="card-title">🔁 Ismétlődő havi tételek
         <button class="btn-link" id="btn-add-rec">+ Új ismétlődő</button></div>
-      <p class="field-hint" style="margin-bottom:10px">Pl. fizetés, albérlet, előfizetések – ezek minden hónapban automatikusan könyvelődnek a megadott napon.</p>
+      <p class="field-hint" style="margin-bottom:10px">Pl. fizetés, albérlet, előfizetések – a beállított gyakorisággal (naponta, hetente, havonta, évente, akár „3 hetente") automatikusan könyvelődnek.</p>
       ${recRows || `<div class="empty-state"><div class="empty-ico">🔁</div><p>Még nincs ismétlődő tétel.<br>Add hozzá a fizetésed és a fix kiadásaid!</p></div>`}
     </div>
   `;
@@ -522,7 +606,7 @@ function renderStats(el) {
     </div>
   `;
 
-  const tx = txOfMonth();
+  const tx = realizedOfMonth();   // statisztika: csak teljesített tételek (pending kizárva)
   const expenses = tx.filter(t => t.type === "expense");
 
   // --- Kördiagram kategóriánként ---
@@ -548,8 +632,8 @@ function renderStats(el) {
   // --- 6 havi oszlopdiagram ---
   const months = [];
   for (let i = 5; i >= 0; i--) months.push(new Date(state.month.getFullYear(), state.month.getMonth() - i, 1));
-  const incomeData = months.map(m => sumBy(txOfMonth(m), "income"));
-  const expenseData = months.map(m => sumBy(txOfMonth(m), "expense"));
+  const incomeData = months.map(m => sumBy(realizedOfMonth(m), "income"));
+  const expenseData = months.map(m => sumBy(realizedOfMonth(m), "expense"));
   state.charts.bar = new Chart($("#chart-bar"), {
     type: "bar",
     data: {
@@ -572,7 +656,7 @@ function renderStats(el) {
   const cumul = (m) => {
     const dim = daysInMonth(m);
     const daily = new Array(dim).fill(0);
-    txOfMonth(m).filter(t => t.type === "expense").forEach(t => {
+    realizedOfMonth(m).filter(t => t.type === "expense").forEach(t => {
       const day = parseInt(t.date.slice(8, 10), 10);
       if (day >= 1 && day <= dim) daily[day - 1] += Number(t.amount);
     });
@@ -603,7 +687,7 @@ function renderStats(el) {
   });
 
   // --- Átlagok ---
-  const last3 = [0, 1, 2].map(i => sumBy(txOfMonth(new Date(state.month.getFullYear(), state.month.getMonth() - i, 1)), "expense"));
+  const last3 = [0, 1, 2].map(i => sumBy(realizedOfMonth(new Date(state.month.getFullYear(), state.month.getMonth() - i, 1)), "expense"));
   const avg3 = last3.reduce((a, b) => a + b, 0) / 3;
   const avg6 = expenseData.reduce((a, b) => a + b, 0) / 6;
   const dayCount = isCurrentMonth(state.month) ? new Date().getDate() : daysInMonth(state.month);
@@ -625,10 +709,7 @@ function renderStats(el) {
   $("#stats-top").innerHTML = top5.length
     ? top5.map(txItemHtml).join("")
     : `<div class="empty-state"><div class="empty-ico">🏆</div><p>Nincs kiadás ebben a hónapban.</p></div>`;
-  el.querySelectorAll("[data-txid]").forEach(item => item.onclick = () => {
-    const t = state.cache.transactions.find(x => x.id === item.dataset.txid);
-    if (t) openTxModal(t);
-  });
+  bindTxItems(el);
 }
 
 // ============ PROFIL ============
@@ -769,6 +850,7 @@ function openTxModal(tx = null, preset = {}) {
   let type = tx?.type || preset.type || "expense";
   let categoryId = tx?.category_id || preset.category_id || state.cache.categories[0]?.id || null;
   let goalId = tx?.goal_id || preset.goal_id || state.cache.goals.filter(g => !g.done)[0]?.id || null;
+  const linkedRec = tx?.recurring_id ? state.cache.recurring.find(r => r.id === tx.recurring_id) : null;
 
   const noteSuggestions = [...new Set(state.cache.transactions.map(t => t.note).filter(Boolean))].slice(0, 30);
   const goalOptions = state.cache.goals.map(g => `<option value="${g.id}" ${g.id === goalId ? "selected" : ""}>${g.icon || "🎯"} ${esc(g.name)}</option>`).join("");
@@ -806,10 +888,21 @@ function openTxModal(tx = null, preset = {}) {
     <div class="field">
       <label>Dátum</label>
       <input type="date" id="tx-date" value="${tx?.date || todayStr()}">
+      <p class="field-hint" id="tx-future-hint" style="display:none">⏳ Jövőbeli dátum – <b>tervezett</b> tételként kerül be: a hó végi egyenlegbe beleszámít, a statisztikába még nem. Később a tételsoron a ✓ gombbal jelölheted teljesítettnek.</p>
     </div>
-    ${!isEdit ? `<label style="display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:6px;cursor:pointer">
-      <input type="checkbox" id="tx-recurring" style="width:18px;height:18px"> 🔁 Ismétlődjön minden hónapban ezen a napon
-    </label>` : ""}
+    <div class="field">
+      <label class="check-row"><input type="checkbox" id="tx-recurring" ${linkedRec ? "checked" : ""}> 🔁 Ismétlődő tétel</label>
+      <div id="tx-recur-opts" style="${linkedRec ? "" : "display:none"}">
+        <div class="freq-row">
+          <span class="freq-lbl">minden</span>
+          <input type="number" id="tx-recur-count" min="1" max="365" value="${linkedRec?.interval_count || 1}" class="freq-count">
+          <select id="tx-recur-unit" class="freq-unit">
+            ${[["day", "nap"], ["week", "hét"], ["month", "hónap"], ["year", "év"]].map(([v, l]) => `<option value="${v}" ${(linkedRec?.interval_unit || "month") === v ? "selected" : ""}>${l}</option>`).join("")}
+          </select>
+        </div>
+        <p class="field-hint">Az első alkalom a fent megadott <b>dátum</b>. Pl. „minden 3 hét" = 3 hetente. Alapértelmezés: minden 1 hónap (havonta).</p>
+      </div>
+    </div>
     <div class="modal-actions">
       ${isEdit ? `<button class="btn btn-danger" id="tx-delete">🗑 Törlés</button>` : ""}
       <button class="btn btn-primary" id="tx-save">${isEdit ? "Mentés" : "Hozzáadás"}</button>
@@ -854,34 +947,73 @@ function openTxModal(tx = null, preset = {}) {
     } else hint.style.display = "none";
   };
 
+  // Jövőbeli dátum jelzése
+  const updateFutureHint = () => {
+    const d = $("#tx-date").value;
+    $("#tx-future-hint").style.display = (d && isFutureDate(d)) ? "block" : "none";
+  };
+  $("#tx-date").onchange = updateFutureHint;
+  updateFutureHint();
+
+  // Ismétlődés kapcsoló
+  $("#tx-recurring").onchange = (e) => {
+    $("#tx-recur-opts").style.display = e.target.checked ? "block" : "none";
+  };
+
   // Mentés
   $("#tx-save").onclick = async () => {
     const amount = parseAmount($("#tx-amount").value);
     if (isNaN(amount) || amount <= 0) { toast("Adj meg érvényes összeget!"); return; }
     const note = $("#tx-note").value.trim();
     const date = $("#tx-date").value || todayStr();
+    const pending = isFutureDate(date);
+    const recurOn = $("#tx-recurring")?.checked;
+    const unit = $("#tx-recur-unit")?.value || "month";
+    const count = Math.max(1, parseInt($("#tx-recur-count")?.value, 10) || 1);
     const row = {
-      type, amount, note, date,
+      type, amount, note, date, pending,
       category_id: type === "expense" ? categoryId : null,
       goal_id: type === "saving" ? ($("#tx-goal")?.value || null) : null,
     };
     try {
       if (isEdit) {
+        if (recurOn && linkedRec) {
+          // meglévő sorozat frissítése (a jövőbeli könyveléseket érinti)
+          await state.store.update("recurring", linkedRec.id, {
+            name: note || linkedRec.name, amount, type, category_id: row.category_id,
+            interval_unit: unit, interval_count: count, active: true,
+          });
+          row.recurring_id = linkedRec.id;
+        } else if (recurOn && !linkedRec) {
+          // most tették ismétlődővé
+          const rec = await state.store.insert("recurring", {
+            name: note || (type === "income" ? "Bevétel" : "Kiadás"), amount, type,
+            category_id: row.category_id, interval_unit: unit, interval_count: count,
+            anchor_date: date, active: true,
+          });
+          row.recurring_id = rec.id;
+        } else if (!recurOn && linkedRec) {
+          // kikapcsolták az ismétlődést → a sorozatot szüneteltetjük
+          await state.store.update("recurring", linkedRec.id, { active: false });
+          row.recurring_id = null;
+        }
         await state.store.update("transactions", tx.id, row);
       } else {
-        await state.store.insert("transactions", row);
-        if ($("#tx-recurring")?.checked) {
-          await state.store.insert("recurring", {
-            name: note || "Ismétlődő tétel", amount, type,
-            category_id: row.category_id, day: new Date(date + "T00:00:00").getDate(), active: true,
+        if (recurOn) {
+          // a sorozat létrehozása, az eredeti tételt hozzákötjük (így nem duplázódik könyveléskor)
+          const rec = await state.store.insert("recurring", {
+            name: note || (type === "income" ? "Bevétel" : "Kiadás"), amount, type,
+            category_id: row.category_id, interval_unit: unit, interval_count: count,
+            anchor_date: date, active: true,
           });
-          toast("Tétel + ismétlődés mentve ✓");
+          row.recurring_id = rec.id;
         }
+        await state.store.insert("transactions", row);
       }
       await refreshCache();
       closeModal();
       renderView();
-      if (!$("#tx-recurring")?.checked) toast(isEdit ? "Tétel módosítva ✓" : "Tétel hozzáadva ✓");
+      toast(isEdit ? "Tétel módosítva ✓" : (recurOn ? "Tétel + ismétlődés mentve 🔁" : "Tétel hozzáadva ✓"));
     } catch (e) {
       toast("Mentési hiba – próbáld újra");
     }
@@ -1003,9 +1135,21 @@ function openRecurringModal() {
     <div class="field"><label>Megnevezés</label><input type="text" id="rec-name" placeholder="Pl. Fizetés, Albérlet, Netflix"></div>
     <div class="field"><label>Összeg</label><input type="text" id="rec-amount" inputmode="decimal" placeholder="Pl. 150k"></div>
     <div class="field" id="rec-cat-field"><label>Kategória</label><select id="rec-cat">${catOptions}</select></div>
-    <div class="field"><label>A hónap melyik napján?</label>
-      <input type="number" id="rec-day" min="1" max="31" value="1">
-      <p class="field-hint">Pl. fizetésnél 5, ha 5-én érkezik. Az adott napon automatikusan könyvelődik.</p></div>
+    <div class="field"><label>Gyakoriság</label>
+      <div class="freq-row">
+        <span class="freq-lbl">minden</span>
+        <input type="number" id="rec-count" min="1" max="365" value="1" class="freq-count">
+        <select id="rec-unit" class="freq-unit">
+          <option value="day">nap</option>
+          <option value="week">hét</option>
+          <option value="month" selected>hónap</option>
+          <option value="year">év</option>
+        </select>
+      </div>
+      <p class="field-hint">Pl. „minden 3 hét" = 3 hetente. Alapértelmezés: minden 1 hónap (havonta).</p></div>
+    <div class="field"><label>Első alkalom / kezdő dátum</label>
+      <input type="date" id="rec-anchor" value="${todayStr()}">
+      <p class="field-hint">Innen indul az ismétlődés. Havi fizetésnél állítsd arra a napra, amikor érkezik (pl. a hónap 5-e).</p></div>
     <div class="modal-actions"><button class="btn btn-primary" id="rec-save">Hozzáadás</button></div>
   `);
   let type = "expense";
@@ -1017,11 +1161,14 @@ function openRecurringModal() {
   $("#rec-save").onclick = async () => {
     const name = $("#rec-name").value.trim();
     const amount = parseAmount($("#rec-amount").value);
-    const day = Math.min(31, Math.max(1, parseInt($("#rec-day").value, 10) || 1));
+    const count = Math.max(1, parseInt($("#rec-count").value, 10) || 1);
+    const unit = $("#rec-unit").value || "month";
+    const anchor = $("#rec-anchor").value || todayStr();
     if (!name || isNaN(amount) || amount <= 0) { toast("Add meg a nevet és az összeget!"); return; }
     await state.store.insert("recurring", {
-      name, amount, type, day, active: true,
+      name, amount, type, active: true,
       category_id: type === "expense" ? $("#rec-cat").value : null,
+      interval_unit: unit, interval_count: count, anchor_date: anchor,
     });
     await refreshCache();
     await applyRecurring();

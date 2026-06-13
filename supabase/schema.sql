@@ -56,6 +56,7 @@ create table if not exists public.transactions (
   note         text,
   date         date not null default current_date,
   recurring_id uuid,
+  pending      boolean default false,   -- true = jövőbeli/tervezett tétel (statisztikába még nem, hó végi egyenlegbe igen)
   created_at   timestamptz default now()
 );
 
@@ -76,16 +77,26 @@ create table if not exists public.goals (
 
 -- ---------- Ismétlődő tételek ----------
 create table if not exists public.recurring (
-  id          uuid primary key default gen_random_uuid(),
-  user_id     uuid not null references auth.users(id) on delete cascade,
-  name        text not null,
-  amount      numeric not null check (amount > 0),
-  type        text not null check (type in ('expense', 'income')),
-  category_id uuid references public.categories(id) on delete set null,
-  day         integer default 1 check (day between 1 and 31),
-  active      boolean default true,
-  created_at  timestamptz default now()
+  id             uuid primary key default gen_random_uuid(),
+  user_id        uuid not null references auth.users(id) on delete cascade,
+  name           text not null,
+  amount         numeric not null check (amount > 0),
+  type           text not null check (type in ('expense', 'income')),
+  category_id    uuid references public.categories(id) on delete set null,
+  day            integer default 1 check (day between 1 and 31),  -- régi mező (visszafelé kompatibilitás)
+  interval_unit  text default 'month' check (interval_unit in ('day', 'week', 'month', 'year')),
+  interval_count integer default 1 check (interval_count >= 1),
+  anchor_date    date,        -- első előfordulás dátuma (innen számoljuk az ismétlődést)
+  active         boolean default true,
+  created_at     timestamptz default now()
 );
+
+-- ---------- Meglévő adatbázis frissítése (ha már korábban lefuttattad a sémát) ----------
+-- Ezek hozzáadják az új oszlopokat, ha még hiányoznak. Hibamentes, ha már léteznek.
+alter table public.transactions add column if not exists pending boolean default false;
+alter table public.recurring    add column if not exists interval_unit  text    default 'month';
+alter table public.recurring    add column if not exists interval_count integer default 1;
+alter table public.recurring    add column if not exists anchor_date    date;
 
 -- ---------- Visszajelzések / tippek ----------
 -- Ide kerülnek az alkalmazásból küldött visszajelzések.
