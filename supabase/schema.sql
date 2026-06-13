@@ -125,6 +125,15 @@ alter table public.goals       enable row level security;
 alter table public.recurring   enable row level security;
 alter table public.feedback    enable row level security;
 
+-- FORCE RLS: a szabályok a tábla tulajdonosára is vonatkoznak (defense-in-depth).
+-- Így minden felhasználó KIZÁRÓLAG a saját adatát éri el; senki nem látja másét.
+alter table public.profiles    force row level security;
+alter table public.categories  force row level security;
+alter table public.transactions force row level security;
+alter table public.goals       force row level security;
+alter table public.recurring   force row level security;
+alter table public.feedback    force row level security;
+
 -- ---- PROFILES ----
 drop policy if exists "profiles_select" on public.profiles;
 create policy "profiles_select" on public.profiles

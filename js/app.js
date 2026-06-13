@@ -12,7 +12,8 @@ const state = {
   user: null,
   month: new Date(),   // kiválasztott hónap
   view: "dashboard",
-  cache: { categories: [], transactions: [], goals: [], recurring: [], profile: {} },
+  household: null,     // közös fiók (ha össze van csatolva), felhő módban
+  cache: { categories: [], transactions: [], goals: [], recurring: [], profile: {}, sharedGoals: [], sharedTx: [], contributions: [] },
   charts: {},
   deferredInstall: null,
 };
@@ -25,7 +26,23 @@ const CURRENCIES = {
   GBP: { symbol: "£", position: "prefix", decimals: 2, label: "Font (£)" },
   RON: { symbol: "lei", position: "suffix", decimals: 2, label: "Román lej (lei)" },
   CHF: { symbol: "Fr", position: "suffix", decimals: 2, label: "Svájci frank (Fr)" },
+  DKK: { symbol: "kr", position: "suffix", decimals: 2, label: "Dán korona (kr)" },
 };
+// Árfolyam-lekérés a mai napra (ingyenes, kulcs nélküli API-k, tartalékkal)
+async function fetchRate(from, to) {
+  // 1) Frankfurter (ECB) – elsődleges
+  try {
+    const r = await fetch(`https://api.frankfurter.dev/v1/latest?base=${from}&symbols=${to}`);
+    if (r.ok) { const d = await r.json(); if (d.rates && d.rates[to]) return d.rates[to]; }
+  } catch (e) { /* tartalékra váltunk */ }
+  // 2) open.er-api.com – tartalék
+  const r2 = await fetch(`https://open.er-api.com/v6/latest/${from}`);
+  if (!r2.ok) throw new Error("rate");
+  const d2 = await r2.json();
+  const f = d2.rates && d2.rates[to];
+  if (!f) throw new Error("rate");
+  return f;
+}
 function getSettings() { try { return JSON.parse(localStorage.getItem("mm_settings") || "{}"); } catch { return {}; } }
 function setSetting(k, v) { const s = getSettings(); s[k] = v; localStorage.setItem("mm_settings", JSON.stringify(s)); }
 const currentCurrency = () => (CURRENCIES[getSettings().currency] ? getSettings().currency : "HUF");
@@ -179,8 +196,14 @@ function freqText(r) {
 }
 
 function catById(id) { return state.cache.categories.find(c => c.id === id); }
-function goalById(id) { return state.cache.goals.find(g => g.id === id); }
+const allGoals = () => [...state.cache.goals, ...(state.cache.sharedGoals || [])];
+function goalById(id) { return allGoals().find(g => g.id === id); }
 function goalSaved(goal) {
+  if (goal.household_id) {
+    // Közös cél: minden tag hozzájárulása összeadódik (shared_contributions)
+    return Number(goal.start_amount || 0) +
+      (state.cache.contributions || []).filter(c => c.goal_id === goal.id).reduce((s, c) => s + Number(c.amount || 0), 0);
+  }
   return Number(goal.start_amount || 0) +
     state.cache.transactions.filter(t => t.type === "saving" && t.goal_id === goal.id)
       .reduce((s, t) => s + Number(t.amount || 0), 0);
@@ -196,7 +219,25 @@ async function refreshCache() {
   ]);
   categories.sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0));
   transactions.sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.created_at || "").localeCompare(a.created_at || ""));
-  state.cache = { categories, transactions, goals, recurring, profile };
+
+  // Közös fiók (csak felhő módban; ha a sharing séma nincs lefuttatva, csendben kihagyjuk)
+  let household = null, sharedGoals = [], sharedTx = [], contributions = [];
+  if (state.store.mode === "cloud") {
+    try {
+      household = await state.store.getHousehold();
+      if (household) {
+        const hid = household.id;
+        [sharedGoals, sharedTx, contributions] = await Promise.all([
+          state.store.listShared("goals", hid),
+          state.store.listShared("transactions", hid),
+          state.store.listContributions(hid),
+        ]);
+        sharedTx.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+      }
+    } catch (e) { /* a közös funkció nem elérhető – kihagyjuk */ }
+  }
+  state.household = household;
+  state.cache = { categories, transactions, goals, recurring, profile, sharedGoals, sharedTx, contributions };
 }
 
 // ---------- Ismétlődő tételek automatikus könyvelése ----------
@@ -399,6 +440,7 @@ function renderDashboard(el) {
   const pendingCount = txAll.filter(isPending).length;
   const plannedExpense = expenseAll - expenseR;
   const plannedIncome = incomeAll - incomeR;
+  const plannedSaving = savingAll - savingR;
 
   const now = new Date();
   const dim = daysInMonth(state.month);
@@ -411,7 +453,7 @@ function renderDashboard(el) {
     const elapsed = now.getDate();
     const projected = elapsed > 0 ? (expenseR / elapsed) * dim : 0;
     const projBalance = incomeAll - projected - savingAll;
-    projHtml = `<div class="banner ${projBalance < 0 ? "warn" : "info"}">${ic("sparkles")}<div><b>Hó végi előrejelzés:</b> a jelenlegi tempóban kb. ${fmt(projected)} lesz az összes kiadásod, így várhatóan <b>${fmt(projBalance)}</b> marad a hónap végén.</div></div>`;
+    projHtml = `<div class="banner ${projBalance < 0 ? "warn" : "info"}">${ic("calculator")}<div><b>Hó végi előrejelzés:</b> a jelenlegi tempóban kb. ${fmt(projected)} lesz az összes kiadásod, így várhatóan <b>${fmt(projBalance)}</b> marad a hónap végén.</div></div>`;
   }
 
   const pendingBanner = pendingCount ? `<div class="banner info">${ic("calendar-clock")}<div><b>${pendingCount} tervezett tétel</b> ebben a hónapban – a hó végi egyenlegbe beleszámítanak, a statisztikába még nem. A Tételek fülön pipáld ki őket, amint megtörténtek.</div></div>` : "";
@@ -482,6 +524,11 @@ function renderDashboard(el) {
         <div class="stat-head"><span class="pill-ico red">${ic("trending-down")}</span> Kiadás</div>
         <div class="stat-value neg">${fmtHTML(expenseR)}</div>
         ${plannedExpense ? `<div class="stat-sub">+ ${fmt(plannedExpense)} tervezett</div>` : ""}
+      </div>
+      <div class="stat-card span2">
+        <div class="stat-head"><span class="pill-ico blue">${ic("piggy-bank")}</span> Megtakarítás / félretett</div>
+        <div class="stat-value blue">${fmtHTML(savingR)}</div>
+        <div class="stat-sub">${plannedSaving ? `+ ${fmt(plannedSaving)} tervezett · ` : ""}nem számít a kiadásokba</div>
       </div>
     </div>
 
@@ -667,45 +714,83 @@ function renderBudget(el) {
 }
 
 // ============ CÉLOK ============
+function goalCardHtml(g) {
+  const isShared = !!g.household_id;
+  const saved = goalSaved(g);
+  const pct = Math.min(100, (saved / g.target_amount) * 100);
+  const remaining = Math.max(0, g.target_amount - saved);
+  let monthlyHtml = "";
+  if (g.deadline && remaining > 0) {
+    const now = new Date(); const dl = new Date(g.deadline);
+    const months = Math.max(1, (dl.getFullYear() - now.getFullYear()) * 12 + (dl.getMonth() - now.getMonth()));
+    monthlyHtml = `<div class="goal-monthly">${ic("calendar-check")}<div>Havi <b>${fmt(remaining / months)}</b> félretételével eléred ${dl.getFullYear()}. ${MONTHS_HU[dl.getMonth()]}ig (${months} hónap)</div></div>`;
+  } else if (remaining === 0) {
+    monthlyHtml = `<div class="goal-monthly done">${ic("party-popper")}<div>Cél elérve! Gratulálunk!</div></div>`;
+  }
+  const dlText = g.deadline ? `Határidő: ${g.deadline.slice(0, 10).replaceAll("-", ". ")}.` : "Nincs határidő";
+  // Közös cél: ki mennyit tett be
+  let contribHtml = "";
+  if (isShared) {
+    const byUser = {};
+    (state.cache.contributions || []).filter(c => c.goal_id === g.id).forEach(c => { const n = c.display_name || "Társ"; byUser[n] = (byUser[n] || 0) + Number(c.amount); });
+    const parts = Object.entries(byUser).map(([n, a]) => `${esc(n)}: <b>${fmt(a)}</b>`).join(" · ");
+    if (parts) contribHtml = `<div class="goal-monthly" style="background:var(--surface-2);color:var(--text-muted)">${ic("users")}<div>${parts}</div></div>`;
+  }
+  const badge = isShared ? `<span class="tx-badge" style="color:var(--primary);border-color:var(--primary)">${ic("users")} közös</span>` : "";
+  return `<div class="goal-card">
+    <div class="goal-head">
+      <div class="goal-ico">${ic(g.icon || "target")}</div>
+      <div style="flex:1;min-width:0"><div class="goal-name">${esc(g.name)} ${badge}</div><div class="goal-deadline">${dlText}</div></div>
+      ${isShared ? "" : `<button class="icon-btn edit" data-editgoal="${g.id}" title="Szerkesztés">${ic("pencil")}</button>`}
+      <button class="icon-btn" data-delgoal="${g.id}" title="Törlés">${ic("trash-2")}</button>
+    </div>
+    <div class="goal-amounts"><span>Összegyűjtve: <b>${fmt(saved)}</b></span><span>Cél: <b>${fmt(g.target_amount)}</b></span></div>
+    <div class="progress" style="height:10px"><div class="progress-fill" data-w="${pct}"></div></div>
+    <div class="goal-amounts"><span>${Math.round(pct)}%</span><span>Még hiányzik: ${fmt(remaining)}</span></div>
+    ${monthlyHtml}
+    ${contribHtml}
+    <div class="goal-actions">
+      <button class="btn btn-ghost btn-sm" data-deposit="${g.id}" style="flex:1">${ic("piggy-bank")} Félreteszek rá</button>
+    </div>
+  </div>`;
+}
+
 function renderGoals(el) {
-  const cards = state.cache.goals.map(g => {
-    const saved = goalSaved(g);
-    const pct = Math.min(100, (saved / g.target_amount) * 100);
-    const remaining = Math.max(0, g.target_amount - saved);
-    let monthlyHtml = "";
-    if (g.deadline && remaining > 0) {
-      const now = new Date();
-      const dl = new Date(g.deadline);
-      const months = Math.max(1, (dl.getFullYear() - now.getFullYear()) * 12 + (dl.getMonth() - now.getMonth()));
-      monthlyHtml = `<div class="goal-monthly">${ic("calendar-check")}<div>Havi <b>${fmt(remaining / months)}</b> félretételével eléred ${dl.getFullYear()}. ${MONTHS_HU[dl.getMonth()]}ig (${months} hónap)</div></div>`;
-    } else if (remaining === 0) {
-      monthlyHtml = `<div class="goal-monthly done">${ic("party-popper")}<div>Cél elérve! Gratulálunk!</div></div>`;
-    }
-    const dlText = g.deadline ? `Határidő: ${g.deadline.slice(0, 10).replaceAll("-", ". ")}.` : "Nincs határidő";
-    return `<div class="goal-card">
-      <div class="goal-head">
-        <div class="goal-ico">${ic(g.icon || "target")}</div>
-        <div style="flex:1;min-width:0"><div class="goal-name">${esc(g.name)}</div><div class="goal-deadline">${dlText}</div></div>
-        <button class="icon-btn edit" data-editgoal="${g.id}" title="Szerkesztés">${ic("pencil")}</button>
-        <button class="icon-btn" data-delgoal="${g.id}" title="Törlés">${ic("trash-2")}</button>
-      </div>
-      <div class="goal-amounts"><span>Összegyűjtve: <b>${fmt(saved)}</b></span><span>Cél: <b>${fmt(g.target_amount)}</b></span></div>
-      <div class="progress" style="height:10px"><div class="progress-fill" data-w="${pct}"></div></div>
-      <div class="goal-amounts"><span>${Math.round(pct)}%</span><span>Még hiányzik: ${fmt(remaining)}</span></div>
-      ${monthlyHtml}
-      <div class="goal-actions">
-        <button class="btn btn-ghost btn-sm" data-deposit="${g.id}" style="flex:1">${ic("piggy-bank")} Félreteszek rá</button>
-      </div>
+  const hh = state.household;
+  const personalCards = state.cache.goals.map(goalCardHtml).join("");
+  const sharedCards = (state.cache.sharedGoals || []).map(goalCardHtml).join("");
+
+  // Közös kassza kártya (közös kiadások e hónapban)
+  let kasszaHtml = "";
+  if (hh) {
+    const stx = (state.cache.sharedTx || []).filter(t => (t.date || "").startsWith(monthKey(state.month)) && t.type === "expense");
+    const total = stx.reduce((s, t) => s + Number(t.amount), 0);
+    const list = stx.slice(0, 6).map(t => {
+      const c = catById(t.category_id); const color = c?.color || "#64748b";
+      const who = (hh.members || []).find(m => m.user_id === t.user_id)?.display_name || "";
+      return `<div class="tx-item"><div class="tx-ico" style="background:${color}22;color:${color}">${ic(c?.icon || "package")}</div>
+        <div class="tx-info"><div class="tx-name">${esc(t.note) || esc(c?.name || "Közös kiadás")}</div><div class="tx-cat">${esc(c?.name || "Egyéb")}${who ? " · " + esc(who) : ""}</div></div>
+        <div class="tx-amount">${fmtHTML(-Math.abs(Number(t.amount)))}</div></div>`;
+    }).join("");
+    const memberNames = (hh.members || []).map(m => esc(m.display_name || "Társ")).join(", ");
+    kasszaHtml = `<div class="card">
+      <div class="card-title">${ic("wallet")} Közös kassza <button class="btn-link" id="btn-add-shared-exp">${ic("plus")} Közös kiadás</button></div>
+      <div class="banner info">${ic("users")}<div>Tagok: <b>${memberNames || "csak te"}</b> · E havi közös kiadás: <b>${fmt(total)}</b></div></div>
+      ${list || `<div class="empty-state"><div class="empty-ico">${ic("receipt-text")}</div><p>Még nincs közös kiadás ebben a hónapban.</p></div>`}
     </div>`;
-  }).join("");
+  }
 
   el.innerHTML = `
-    <div class="section-title">Céljaid</div>
-    ${cards || `<div class="empty-state"><div class="empty-ico">${ic("target")}</div><p>Még nincs célod.<br>Mire gyűjtenél? Nyaralás, autó, vésztartalék?</p></div>`}
+    <div class="section-title">Célok</div>
+    ${kasszaHtml}
+    ${hh && sharedCards ? `<div class="card-title" style="margin:6px 2px 8px">Közös célok</div>${sharedCards}` : ""}
+    ${hh ? `<div class="card-title" style="margin:16px 2px 8px">Saját célok</div>` : ""}
+    ${personalCards || `<div class="empty-state"><div class="empty-ico">${ic("target")}</div><p>Még nincs célod.<br>Mire gyűjtenél? Nyaralás, autó, vésztartalék?</p></div>`}
     <button class="btn btn-primary btn-block" id="btn-add-goal">${ic("plus")} Új cél hozzáadása</button>
   `;
   animateBars(el);
   $("#btn-add-goal").onclick = () => openGoalModal();
+  const sExp = $("#btn-add-shared-exp"); if (sExp) sExp.onclick = () => openTxModal(null, { type: "expense", shared: true });
   el.querySelectorAll("[data-editgoal]").forEach(b => b.onclick = () => openGoalModal(goalById(b.dataset.editgoal)));
   el.querySelectorAll("[data-delgoal]").forEach(b => b.onclick = async () => {
     if (!confirm("Biztosan törlöd a célt?")) return;
@@ -718,28 +803,41 @@ function renderGoals(el) {
 }
 
 // Időszak-adatok az egyedi oszlopdiagramhoz (Napi / Heti / Havi)
-function periodData(mode) {
+// Az ablak a `anchor` hónaphoz van rögzítve: a jobb szélső oszlop mindig az aktuális (anchor) hónap/nap/hét.
+function periodData(mode, anchor = state.month) {
   const expSum = (list) => list.filter(t => t.type === "expense").reduce((s, t) => s + Number(t.amount), 0);
   let bars = [];
   if (mode === "day") {
-    const base = isCurrentMonth(state.month) ? today0() : new Date(state.month.getFullYear(), state.month.getMonth(), daysInMonth(state.month));
+    const base = isCurrentMonth(anchor) ? today0() : new Date(anchor.getFullYear(), anchor.getMonth(), daysInMonth(anchor));
     for (let i = 6; i >= 0; i--) {
       const d = new Date(base); d.setDate(base.getDate() - i); const ds = isoDate(d);
-      bars.push({ label: DAYS_HU[d.getDay()].slice(0, 2), value: expSum(realized(state.cache.transactions.filter(t => t.date === ds))) });
+      bars.push({ label: DAYS_HU[d.getDay()].slice(0, 2), value: expSum(realized(state.cache.transactions.filter(t => t.date === ds))), ds });
     }
   } else if (mode === "week") {
-    const dim = daysInMonth(state.month);
+    const dim = daysInMonth(anchor);
     const weeks = {};
-    realizedOfMonth().filter(t => t.type === "expense").forEach(t => { const day = parseInt(t.date.slice(8, 10), 10); weeks[Math.floor((day - 1) / 7)] = (weeks[Math.floor((day - 1) / 7)] || 0) + Number(t.amount); });
-    for (let w = 0; w < Math.ceil(dim / 7); w++) bars.push({ label: (w + 1) + ".", value: weeks[w] || 0 });
+    realizedOfMonth(anchor).filter(t => t.type === "expense").forEach(t => { const w = Math.floor((parseInt(t.date.slice(8, 10), 10) - 1) / 7); weeks[w] = (weeks[w] || 0) + Number(t.amount); });
+    for (let w = 0; w < Math.ceil(dim / 7); w++) bars.push({ label: (w + 1) + ".", value: weeks[w] || 0, wk: w });
   } else {
-    for (let i = 5; i >= 0; i--) { const mo = new Date(state.month.getFullYear(), state.month.getMonth() - i, 1); bars.push({ label: MONTHS_HU[mo.getMonth()].slice(0, 3), value: expSum(realizedOfMonth(mo)), cur: monthKey(mo) === monthKey(state.month) }); }
+    for (let i = 5; i >= 0; i--) { const mo = new Date(anchor.getFullYear(), anchor.getMonth() - i, 1); bars.push({ label: MONTHS_HU[mo.getMonth()].slice(0, 3), value: expSum(realizedOfMonth(mo)), m: mo }); }
   }
   const max = Math.max(1, ...bars.map(b => b.value));
-  let activeIdx = bars.reduce((mi, b, i, arr) => (b.value > arr[mi].value ? i : mi), 0);
-  if (mode === "month") { const ci = bars.findIndex(b => b.cur); if (ci >= 0) activeIdx = ci; }
-  bars.forEach((b, i) => (b.active = i === activeIdx));
   return { bars, max, total: bars.reduce((s, b) => s + b.value, 0) };
+}
+// Egy oszlop (időszak) kiadásai kategóriánként
+function barCatExpenses(mode, bar, anchor = state.month) {
+  let list;
+  if (mode === "day") list = realized(state.cache.transactions.filter(t => t.date === bar.ds));
+  else if (mode === "week") list = realizedOfMonth(anchor).filter(t => Math.floor((parseInt(t.date.slice(8, 10), 10) - 1) / 7) === bar.wk);
+  else list = realizedOfMonth(bar.m);
+  const out = {};
+  list.filter(t => t.type === "expense").forEach(t => { const id = t.category_id || "_"; out[id] = (out[id] || 0) + Number(t.amount); });
+  return out;
+}
+function barTitle(mode, bar, anchor = state.month) {
+  if (mode === "day") { const d = new Date(bar.ds + "T00:00:00"); return `${d.getMonth() + 1}. ${d.getDate()}. (${DAYS_HU[d.getDay()]})`; }
+  if (mode === "week") return `${monthLabel(anchor)} · ${bar.wk + 1}. hét`;
+  return monthLabel(bar.m);
 }
 
 // ============ STATISZTIKÁK ============
@@ -748,49 +846,37 @@ function renderStats(el) {
   const expenses = tx.filter(t => t.type === "expense");
   const prevMonth = new Date(state.month.getFullYear(), state.month.getMonth() - 1, 1);
   const C = themeColors();
+  const pmode = state.statsPeriod || "day";   // megőrzött időszak-nézet
 
   // Kategória-bontás aktuális + előző hónap (trendhez)
   const byCat = {};
   expenses.forEach(t => { const id = t.category_id || "_"; byCat[id] = (byCat[id] || 0) + Number(t.amount); });
-  const prevByCat = {};
-  realizedOfMonth(prevMonth).filter(t => t.type === "expense").forEach(t => { const id = t.category_id || "_"; prevByCat[id] = (prevByCat[id] || 0) + Number(t.amount); });
   const catSorted = Object.keys(byCat).sort((a, b) => byCat[b] - byCat[a]);
   const totalExp = sumBy(tx, "expense");
-
-  const catRows = catSorted.map(id => {
-    const c = catById(id);
-    const sum = byCat[id], prev = prevByCat[id] || 0;
-    let trend = "";
-    if (prev > 0) { const p = Math.round((sum - prev) / prev * 100); trend = `<span class="trend ${p > 0 ? "down" : "up"}">${ic(p > 0 ? "trending-up" : "trending-down")} ${p > 0 ? "+" : ""}${p}%</span>`; }
-    else if (sum > 0) trend = `<span class="trend down">${ic("trending-up")} új</span>`;
-    const color = c?.color || "#64748b";
-    return `<div class="catrow">
-      <div class="tx-ico" style="background:${color}22;color:${color}">${ic(c?.icon || "package")}</div>
-      <div class="catrow-info"><div class="catrow-name">${esc(c?.name || "Egyéb")}</div><div class="catrow-total">${fmt(sum)} · ${totalExp ? Math.round(sum / totalExp * 100) : 0}%</div></div>
-      ${trend}
-    </div>`;
-  }).join("");
 
   el.innerHTML = `
     <div class="section-title">Statisztika</div>
     <div class="card" id="period-card">
       <div class="segment" id="period-seg">
-        <button data-pm="day" class="active">Napi</button>
-        <button data-pm="week">Heti</button>
-        <button data-pm="month">Havi</button>
+        <button data-pm="day" class="${pmode === "day" ? "active" : ""}">Napi</button>
+        <button data-pm="week" class="${pmode === "week" ? "active" : ""}">Heti</button>
+        <button data-pm="month" class="${pmode === "month" ? "active" : ""}">Havi</button>
       </div>
-      <div class="chart-total"><div class="amt" id="period-total"></div><div class="lbl">összes kiadás az időszakban</div></div>
+      <div class="chart-total"><div class="amt" id="period-total"></div><div class="lbl" id="period-lbl">összes kiadás az időszakban</div></div>
       <div class="barchart" id="period-bars"></div>
-      <div class="chart-hint">Érintsd meg a füleket a nézet váltásához</div>
+      <div class="chart-hint" id="period-hint"></div>
     </div>
 
     <div class="card">
-      <div class="card-title">Kiadások kategóriánként <span style="color:var(--text-muted);font-weight:600">${monthLabel(state.month)}</span></div>
-      ${catRows || `<div class="empty-state"><div class="empty-ico">${ic("chart-pie")}</div><p>Nincs kiadás ebben a hónapban.</p></div>`}
+      <div class="card-title">Kiadások kategóriánként <span id="cat-breakdown-title" style="color:var(--text-muted);font-weight:600"></span></div>
+      <div id="cat-breakdown"></div>
     </div>
 
     <div class="card"><div class="card-title">Bevétel vs. kiadás <span style="color:var(--text-muted);font-weight:600">utolsó 6 hónap</span></div>
       <div class="chart-box"><canvas id="chart-bar"></canvas></div></div>
+    <div class="card"><div class="card-title">Kategóriák havi összehasonlítása <span style="color:var(--text-muted);font-weight:600">utolsó 6 hónap</span></div>
+      <p class="field-hint" style="margin:-6px 0 12px">Havonta, kategóriánként mennyit költöttél (egymásra rakva).</p>
+      <div class="chart-box" style="height:270px"><canvas id="chart-catcompare"></canvas></div></div>
     <div class="card"><div class="card-title">Halmozott napi költés <span style="color:var(--text-muted);font-weight:600">e havi vs. előző havi</span></div>
       <div class="chart-box" style="height:210px"><canvas id="chart-line"></canvas></div></div>
 
@@ -800,20 +886,46 @@ function renderStats(el) {
     </div>
   `;
 
-  // --- Egyedi időszak-oszlopdiagram (váltható) ---
-  let pmode = "day";
-  function renderPeriod() {
-    const d = periodData(pmode);
-    $("#period-total").innerHTML = fmtHTML(d.total);
-    $("#period-bars").innerHTML = d.bars.map(b => `
-      <div class="bar-col ${b.active ? "active" : ""}" title="${esc(b.label)}: ${fmt(b.value)}">
+  // --- Egyedi időszak-oszlopdiagram (váltható + oszlopra kattintható, ablak rögzített) ---
+  function fillBreakdown(mode, bars, sel) {
+    const curC = barCatExpenses(mode, bars[sel]);
+    const prevC = sel > 0 ? barCatExpenses(mode, bars[sel - 1]) : {};
+    const total = Object.values(curC).reduce((a, b) => a + b, 0);
+    const ids = Object.keys(curC).sort((a, b) => curC[b] - curC[a]);
+    $("#cat-breakdown-title").textContent = barTitle(mode, bars[sel]);
+    $("#cat-breakdown").innerHTML = ids.length ? ids.map(id => {
+      const c = catById(id); const sum = curC[id], prev = prevC[id] || 0;
+      let trend = "";
+      if (prev > 0) { const p = Math.round((sum - prev) / prev * 100); trend = `<span class="trend ${p > 0 ? "down" : "up"}">${ic(p > 0 ? "trending-up" : "trending-down")} ${p > 0 ? "+" : ""}${p}%</span>`; }
+      else if (sum > 0 && sel > 0) trend = `<span class="trend down">${ic("trending-up")} új</span>`;
+      const color = c?.color || "#64748b";
+      return `<div class="catrow">
+        <div class="tx-ico" style="background:${color}22;color:${color}">${ic(c?.icon || "package")}</div>
+        <div class="catrow-info"><div class="catrow-name">${esc(c?.name || "Egyéb")}</div><div class="catrow-total">${fmt(sum)} · ${total ? Math.round(sum / total * 100) : 0}%</div></div>
+        ${trend}
+      </div>`;
+    }).join("") : `<div class="empty-state"><div class="empty-ico">${ic("chart-pie")}</div><p>Nincs kiadás ebben az időszakban.</p></div>`;
+    drawIcons();
+  }
+  function renderPeriod(selIdx) {
+    const mode = state.statsPeriod || "day";
+    const d = periodData(mode, state.month);
+    // alapból a jobb szélső (= aktuális) oszlop kiválasztva; kattintásra csak a kiválasztás vált, az ablak marad
+    const sel = (selIdx != null && selIdx >= 0 && selIdx < d.bars.length) ? selIdx : d.bars.length - 1;
+    $("#period-total").innerHTML = fmtHTML(d.bars[sel] ? d.bars[sel].value : 0);
+    $("#period-lbl").textContent = "kiadás – " + (d.bars[sel] ? barTitle(mode, d.bars[sel]) : "");
+    $("#period-hint").textContent = "Koppints egy oszlopra a részletekért";
+    $("#period-bars").innerHTML = d.bars.map((b, i) => `
+      <div class="bar-col ${i === sel ? "active" : ""}" data-idx="${i}" title="${esc(b.label)}: ${fmt(b.value)}">
         <div class="bar-track"><div class="bar-fill" data-h="${d.max ? Math.round(b.value / d.max * 100) : 0}"></div></div>
         <div class="bar-label">${esc(b.label)}</div>
       </div>`).join("");
+    $("#period-bars").querySelectorAll(".bar-col").forEach(col => col.onclick = () => renderPeriod(Number(col.dataset.idx)));
+    fillBreakdown(mode, d.bars, sel);
     animateBars($("#period-card"));
   }
   $("#period-seg").querySelectorAll("button").forEach(b => b.onclick = () => {
-    pmode = b.dataset.pm;
+    state.statsPeriod = b.dataset.pm;
     $("#period-seg").querySelectorAll("button").forEach(x => x.classList.toggle("active", x === b));
     renderPeriod();
   });
@@ -835,6 +947,30 @@ function renderStats(el) {
         tooltip: { callbacks: { label: (c) => ` ${c.dataset.label}: ${fmt(c.parsed.y)}` } } },
       scales: { x: { grid: { display: false }, ticks: { color: C.muted } }, y: { grid: { color: C.grid }, ticks: { color: C.muted, callback: (v) => (v / 1000) + "k" } } } },
   });
+
+  // --- Kategóriák havi összehasonlítása (stacked) ---
+  const monthExp = months.map(m => realizedOfMonth(m).filter(t => t.type === "expense"));
+  const catTotals = {};
+  monthExp.forEach(list => list.forEach(t => { const id = t.category_id || "_"; catTotals[id] = (catTotals[id] || 0) + Number(t.amount); }));
+  const topCatIds = Object.keys(catTotals).filter(id => catTotals[id] > 0).sort((a, b) => catTotals[b] - catTotals[a]).slice(0, 8);
+  if (topCatIds.length) {
+    const catDatasets = topCatIds.map(id => {
+      const c = catById(id);
+      return { label: c?.name || "Egyéb", backgroundColor: c?.color || "#64748b",
+        data: monthExp.map(list => list.filter(t => (t.category_id || "_") === id).reduce((s, t) => s + Number(t.amount), 0)),
+        borderRadius: 4, maxBarThickness: 30 };
+    });
+    state.charts.catcompare = new Chart($("#chart-catcompare"), {
+      type: "bar",
+      data: { labels: months.map(m => MONTHS_HU[m.getMonth()].slice(0, 3)), datasets: catDatasets },
+      options: { responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { position: "bottom", labels: { boxWidth: 10, color: C.muted, font: { family: "Inter", size: 11 } } },
+          tooltip: { callbacks: { label: (c) => ` ${c.dataset.label}: ${fmt(c.parsed.y)}` } } },
+        scales: { x: { stacked: true, grid: { display: false }, ticks: { color: C.muted } }, y: { stacked: true, grid: { color: C.grid }, ticks: { color: C.muted, callback: (v) => (v / 1000) + "k" } } } },
+    });
+  } else {
+    $("#chart-catcompare").closest(".chart-box").innerHTML = `<div class="empty-state"><div class="empty-ico">${ic("chart-column")}</div><p>Nincs elég adat az összehasonlításhoz.</p></div>`;
+  }
 
   // --- Halmozott vonal ---
   const cumul = (m) => { const dim = daysInMonth(m); const daily = new Array(dim).fill(0); realizedOfMonth(m).filter(t => t.type === "expense").forEach(t => { const day = parseInt(t.date.slice(8, 10), 10); if (day >= 1 && day <= dim) daily[day - 1] += Number(t.amount); }); let run = 0; return daily.map(v => (run += v)); };
@@ -916,6 +1052,24 @@ function renderProfile(el) {
     </div>
 
     <div class="card">
+      <div class="card-title">${ic("users")} Közös fiók (pár / barát)</div>
+      ${isCloud ? (state.household ? `
+        <div class="banner info">${ic("users")}<div>Tagok: <b>${(state.household.members || []).map(m => esc(m.display_name || "Társ")).join(", ") || "csak te"}</b></div></div>
+        <p class="field-hint" style="margin-bottom:12px">Közös célt és közös kiadást a <b>Célok</b> fülön tudtok létrehozni – mindketten látjátok és kezelitek.</p>
+        <button class="btn btn-ghost btn-block" id="btn-new-invite" style="margin-bottom:10px">${ic("user-plus")} Új meghívó kód</button>
+        <div id="invite-out"></div>
+        <button class="btn btn-danger btn-block" id="btn-leave-hh">${ic("log-out")} Kilépés a közös fiókból</button>
+      ` : `
+        <p class="field-hint" style="margin-bottom:12px">Kösd össze a fiókod a pároddal: generálj egy 6 jegyű kódot és add oda neki, vagy írd be az ő kódját.</p>
+        <button class="btn btn-primary btn-block" id="btn-new-invite" style="margin-bottom:10px">${ic("user-plus")} Meghívó kód generálása</button>
+        <div id="invite-out"></div>
+        <div class="field" style="margin-top:12px"><label>Csatlakozás kóddal</label>
+          <div style="display:flex;gap:8px"><input type="text" id="join-code" inputmode="numeric" maxlength="6" placeholder="6 jegyű kód"><button class="btn btn-ghost" id="btn-join">Csatlakozás</button></div>
+        </div>
+      `) : `<div class="banner warn">${ic("triangle-alert")}<div>A közös fiók csak regisztrált (felhő) fiókkal érhető el. Jelentkezz be a használatához.</div></div>`}
+    </div>
+
+    <div class="card">
       <div class="card-title">Fiók</div>
       <div class="field"><label>Név</label><div class="input-wrap">${ic("user")}<input type="text" id="profile-name" value="${esc(name)}" placeholder="A neved"></div></div>
       <div class="banner info">${ic(isCloud ? "cloud" : "smartphone")}<div>${isCloud ? "Az adataid a Supabase felhőben tárolódnak, minden eszközödön elérhetők." : "Helyi mód: az adataid csak ezen az eszközön, a böngészőben tárolódnak."}</div></div>
@@ -943,11 +1097,71 @@ function renderProfile(el) {
       <button class="btn btn-danger btn-block" id="btn-logout">${ic("log-out")} ${isCloud ? "Kijelentkezés" : "Kilépés a helyi módból"}</button>
       ${!isCloud ? `<button class="btn btn-danger btn-block" id="btn-wipe" style="margin-top:10px">${ic("trash-2")} Helyi adatok törlése</button>` : ""}
     </div>
-    <p style="text-align:center;color:var(--text-faint);font-size:12px">MoneyManage (MM) v1.2</p>
+    <p style="text-align:center;color:var(--text-faint);font-size:12px">MoneyManage (MM) v1.4</p>
   `;
 
   $("#seg-theme").querySelectorAll("button").forEach(b => b.onclick = () => { setSetting("theme", b.dataset.theme); applyTheme(); });
-  $("#cur-select").onchange = (e) => { setSetting("currency", e.target.value); renderView(); toast("Pénznem módosítva", "check"); };
+
+  // ---- Közös fiók ----
+  const btnInvite = $("#btn-new-invite");
+  if (btnInvite) btnInvite.onclick = async () => {
+    btnInvite.disabled = true;
+    try {
+      const code = await state.store.createInvite();
+      const had = !!state.household;
+      await refreshCache();
+      $("#invite-out").innerHTML = `<div class="banner info" style="justify-content:center"><div style="text-align:center">Add oda ezt a kódot a társadnak (7 napig érvényes):<br><b style="font-size:28px;letter-spacing:5px">${esc(code)}</b></div></div>`;
+      drawIcons();
+      if (!had && state.household) toast("Közös fiók létrehozva", "check");
+    } catch (e) {
+      toast("Nem sikerült kódot generálni – futott már a sharing.sql?");
+    } finally { btnInvite.disabled = false; }
+  };
+  const btnJoin = $("#btn-join");
+  if (btnJoin) btnJoin.onclick = async () => {
+    const code = ($("#join-code").value || "").trim();
+    if (!/^\d{6}$/.test(code)) { toast("Adj meg egy 6 jegyű kódot"); return; }
+    btnJoin.disabled = true;
+    try {
+      await state.store.joinHousehold(code);
+      await refreshCache(); renderView();
+      toast("Sikeresen összecsatolva!", "check");
+    } catch (e) {
+      toast(/INVALID_CODE/.test(e.message || "") ? "Érvénytelen vagy lejárt kód" : "Csatlakozás sikertelen");
+      btnJoin.disabled = false;
+    }
+  };
+  const btnLeave = $("#btn-leave-hh");
+  if (btnLeave) btnLeave.onclick = async () => {
+    if (!confirm("Biztosan kilépsz a közös fiókból? A közös tételek/célok a társadnál megmaradnak.")) return;
+    try { await state.store.leaveHousehold(state.household.id); await refreshCache(); renderView(); toast("Kiléptél a közös fiókból"); }
+    catch (e) { toast("Nem sikerült kilépni"); }
+  };
+
+  $("#cur-select").onchange = async (e) => {
+    const from = currentCurrency();
+    const to = e.target.value;
+    const sel = e.target;
+    if (from === to) return;
+    sel.disabled = true;
+    try {
+      const factor = await fetchRate(from, to);
+      const human = factor >= 1 ? factor.toFixed(2) : factor.toPrecision(3);
+      if (!confirm(`Átváltod az összes összeget a mai árfolyamon?\n\n${CURRENCIES[from].label} → ${CURRENCIES[to].label}\n1 ${CURRENCIES[from].symbol} = ${human} ${CURRENCIES[to].symbol}`)) {
+        sel.value = from; sel.disabled = false; return;
+      }
+      await state.store.convertAll(factor);
+      setSetting("currency", to);
+      await refreshCache();
+      renderView();
+      toast("Összegek átváltva a mai árfolyamon", "check");
+    } catch (err) {
+      sel.value = from;
+      toast("Árfolyam lekérése sikertelen – ellenőrizd az internetet");
+    } finally {
+      sel.disabled = false;
+    }
+  };
   $("#btn-save-profile").onclick = async () => { await state.store.setProfile({ name: $("#profile-name").value.trim() }); await refreshCache(); renderView(); toast("Profil mentve", "check"); };
 
   // ---- Visszajelzés ----
@@ -1027,12 +1241,14 @@ function openTxModal(tx = null, preset = {}) {
   const isEdit = !!tx;
   let type = tx?.type || preset.type || "expense";
   let categoryId = tx?.category_id || preset.category_id || state.cache.categories[0]?.id || null;
-  let goalId = tx?.goal_id || preset.goal_id || state.cache.goals.filter(g => !g.done)[0]?.id || null;
+  let goalId = tx?.goal_id || preset.goal_id || allGoals().filter(g => !g.done)[0]?.id || null;
   const linkedRec = tx?.recurring_id ? state.cache.recurring.find(r => r.id === tx.recurring_id) : null;
 
   const noteSuggestions = [...new Set(state.cache.transactions.map(t => t.note).filter(Boolean))].slice(0, 30);
-  const goalOptions = state.cache.goals.map(g => `<option value="${g.id}" ${g.id === goalId ? "selected" : ""}>${esc(g.name)}</option>`).join("");
+  const goalOptions = allGoals().map(g => `<option value="${g.id}" ${g.id === goalId ? "selected" : ""}>${esc(g.name)}${g.household_id ? " (közös)" : ""}</option>`).join("");
   const curMeta = CURRENCIES[currentCurrency()];
+  const canShare = state.store.mode === "cloud" && !!state.household;   // van összecsatolt közös fiók
+  const myName = state.cache.profile?.name || state.user?.user_metadata?.name || "Társ";
 
   openModal(isEdit ? "Tétel szerkesztése" : "Új tétel", `
     <div class="type-switch" id="tx-type-switch">
@@ -1066,7 +1282,11 @@ function openTxModal(tx = null, preset = {}) {
     <div class="field" id="tx-goal-field" style="${type === "saving" ? "" : "display:none"}">
       <label>Melyik célra teszel félre?</label>
       <select id="tx-goal">${goalOptions || `<option value="">Nincs cél – általános megtakarítás</option>`}</select>
+      <p class="field-hint">Közös célnál a befizetés a te megtakarításodba számít, a cél összege pedig mindkettőtöknél nő.</p>
     </div>
+    ${canShare ? `<div class="field" id="tx-shared-field" style="${type === "expense" ? "" : "display:none"}">
+      <label class="check-row"><input type="checkbox" id="tx-shared" ${preset.shared ? "checked" : ""}> ${ic("users")} Közös kiadás (a közös kasszába)</label>
+    </div>` : ""}
     <div class="field">
       <label>Dátum</label>
       <input type="date" id="tx-date" value="${tx?.date || todayStr()}">
@@ -1097,6 +1317,7 @@ function openTxModal(tx = null, preset = {}) {
     $("#tx-type-switch").querySelectorAll("button").forEach(x => x.classList.toggle("active", x === b));
     $("#tx-cat-field").style.display = type === "expense" ? "" : "none";
     $("#tx-goal-field").style.display = type === "saving" ? "" : "none";
+    const sf = $("#tx-shared-field"); if (sf) sf.style.display = type === "expense" ? "" : "none";
   });
 
   // Gyorsösszegek
@@ -1158,6 +1379,10 @@ function openTxModal(tx = null, preset = {}) {
       category_id: type === "expense" ? categoryId : null,
       goal_id: type === "saving" ? ($("#tx-goal")?.value || null) : null,
     };
+    // Közös fiók: közös kiadás, ill. közös célba befizetés
+    const sharedOn = type === "expense" && state.household && $("#tx-shared")?.checked;
+    const goalObj = type === "saving" ? goalById(row.goal_id) : null;
+    const sharedGoal = goalObj && goalObj.household_id ? goalObj : null;
     try {
       if (isEdit) {
         if (recurOn && linkedRec) {
@@ -1181,6 +1406,14 @@ function openTxModal(tx = null, preset = {}) {
           row.recurring_id = null;
         }
         await state.store.update("transactions", tx.id, row);
+      } else if (sharedOn) {
+        // Közös kiadás → a közös kasszába (mindkét fél látja)
+        await state.store.insertShared("transactions", row, state.household.id);
+      } else if (sharedGoal) {
+        // Közös célba: a befizetés a SAJÁT megtakarításodba számít (privát tétel),
+        // a cél összege pedig a közös hozzájárulás-naplóból nő (mindkét félnél)
+        await state.store.insert("transactions", row);
+        await state.store.addContribution({ household_id: sharedGoal.household_id, goal_id: sharedGoal.id, amount, date, display_name: myName });
       } else {
         if (recurOn) {
           // a sorozat létrehozása, az eredeti tételt hozzákötjük (így nem duplázódik könyveléskor)
@@ -1196,7 +1429,7 @@ function openTxModal(tx = null, preset = {}) {
       await refreshCache();
       closeModal();
       renderView();
-      toast(isEdit ? "Tétel módosítva" : (recurOn ? "Tétel + ismétlődés mentve" : "Tétel hozzáadva"), "check");
+      toast(isEdit ? "Tétel módosítva" : sharedOn ? "Közös kiadás hozzáadva" : sharedGoal ? "Befizetés a közös célba" : (recurOn ? "Tétel + ismétlődés mentve" : "Tétel hozzáadva"), "check");
     } catch (e) {
       toast("Mentési hiba – próbáld újra");
     }
@@ -1218,6 +1451,7 @@ function openGoalModal(goal = null) {
   const isEdit = !!goal;
   const icons = ["target", "umbrella", "car", "house", "gem", "graduation-cap", "laptop", "shield", "plane", "music", "baby", "dog"];
   const sel = iconName(goal?.icon || "target");
+  const canShare = state.store.mode === "cloud" && !!state.household;
   openModal(isEdit ? "Cél szerkesztése" : "Új cél", `
     <div class="field"><label>Mi a célod?</label>
       <input type="text" id="goal-name" placeholder="Pl. nyaralás, autó, vésztartalék" value="${esc(goal?.name || "")}"></div>
@@ -1232,6 +1466,7 @@ function openGoalModal(goal = null) {
       <input type="text" id="goal-start" inputmode="decimal" placeholder="0" value="${goal?.start_amount || ""}"></div>
     <div class="field"><label>Határidő (nem kötelező)</label>
       <input type="date" id="goal-deadline" value="${goal?.deadline ? goal.deadline.slice(0, 10) : ""}"></div>
+    ${(!isEdit && canShare) ? `<div class="field"><label class="check-row"><input type="checkbox" id="goal-shared"> ${ic("users")} Közös cél (a társaddal együtt gyűjtötök rá)</label></div>` : ""}
     <div class="banner info" id="goal-calc" style="display:none"></div>
     <div class="modal-actions">
       <button class="btn btn-primary" id="goal-save">${isEdit ? "Mentés" : "Cél létrehozása"}</button>
@@ -1271,10 +1506,12 @@ function openGoalModal(goal = null) {
       start_amount: parseAmount($("#goal-start").value) || 0,
       deadline: $("#goal-deadline").value || null,
     };
+    const shared = !isEdit && canShare && $("#goal-shared")?.checked;
     if (isEdit) await state.store.update("goals", goal.id, row);
+    else if (shared) await state.store.insertShared("goals", row, state.household.id);
     else await state.store.insert("goals", row);
     await refreshCache(); closeModal(); renderView();
-    toast(isEdit ? "Cél módosítva" : "Cél létrehozva", "check");
+    toast(isEdit ? "Cél módosítva" : shared ? "Közös cél létrehozva" : "Cél létrehozva", "check");
   };
 }
 

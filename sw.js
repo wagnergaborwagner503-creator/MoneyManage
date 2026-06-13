@@ -1,5 +1,5 @@
 // MoneyManage service worker – offline shell cache
-const CACHE = "mm-cache-v4";
+const CACHE = "mm-cache-v6";
 const SHELL = [
   "./",
   "./index.html",
@@ -27,8 +27,8 @@ self.addEventListener("activate", (e) => {
 
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
-  // Supabase API hívásokat soha ne cache-eljük
-  if (url.hostname.endsWith(".supabase.co")) return;
+  // Supabase és árfolyam-API hívásokat soha ne cache-eljük (mindig friss adat)
+  if (url.hostname.endsWith(".supabase.co") || url.hostname.endsWith("frankfurter.dev") || url.hostname.endsWith("er-api.com")) return;
   if (e.request.method !== "GET") return;
 
   // Saját fájlok: network-first (friss kód), offline esetén cache

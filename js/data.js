@@ -70,6 +70,23 @@ class LocalStore {
   }
   async getProfile() { return this.data.profile || { name: "Vendég" }; }
   async setProfile(patch) { this.data.profile = { ...this.data.profile, ...patch }; this._save(); }
+  async convertAll(factor) {
+    const r = (n) => Math.round((Number(n) || 0) * factor * 100) / 100;
+    this.data.transactions.forEach(t => { t.amount = r(t.amount); });
+    this.data.goals.forEach(g => { g.target_amount = r(g.target_amount); g.start_amount = r(g.start_amount); });
+    this.data.categories.forEach(c => { c.budget = r(c.budget); });
+    this.data.recurring.forEach(x => { x.amount = r(x.amount); });
+    this._save();
+  }
+  // ---- Közös fiók: csak felhő módban (helyi módban nem elérhető) ----
+  async getHousehold() { return null; }
+  async createInvite() { throw new Error("local"); }
+  async joinHousehold() { throw new Error("local"); }
+  async leaveHousehold() {}
+  async listShared() { return []; }
+  async insertShared() { throw new Error("local"); }
+  async listContributions() { return []; }
+  async addContribution() { throw new Error("local"); }
   async sendFeedback(row) {
     // Helyi módban nincs szerver – csak a konzolba írjuk (Supabase nélkül nem küldhető el)
     console.info("[MM feedback – helyi mód]", row);
@@ -94,7 +111,10 @@ class SupaStore {
     }
   }
   async list(table) {
-    const { data, error } = await this.sb.from(table).select("*").eq("user_id", this.uid);
+    // Személyes nézet: a közös (household_id-vel ellátott) tételek NEM jelennek meg itt
+    let q = this.sb.from(table).select("*").eq("user_id", this.uid);
+    if (["transactions", "categories", "goals"].includes(table)) q = q.is("household_id", null);
+    const { data, error } = await q;
     if (error) { console.error(`${table} lekérés hiba:`, error.message); return []; }
     return data || [];
   }
@@ -104,13 +124,55 @@ class SupaStore {
     return data;
   }
   async update(table, id, patch) {
-    const { data, error } = await this.sb.from(table).update(patch).eq("id", id).eq("user_id", this.uid).select().single();
+    // user_id szűrő nélkül – a jogosultságot az RLS dönti el (közös tételt a társ is módosíthat)
+    const { data, error } = await this.sb.from(table).update(patch).eq("id", id).select().single();
     if (error) { console.error(`${table} módosítás hiba:`, error.message); throw error; }
     return data;
   }
   async remove(table, id) {
-    const { error } = await this.sb.from(table).delete().eq("id", id).eq("user_id", this.uid);
+    const { error } = await this.sb.from(table).delete().eq("id", id);
     if (error) { console.error(`${table} törlés hiba:`, error.message); throw error; }
+  }
+  // ---- Közös fiók (cloud) ----
+  async listShared(table, hid) {
+    const { data, error } = await this.sb.from(table).select("*").eq("household_id", hid);
+    if (error) { console.error(`${table} (közös) lekérés hiba:`, error.message); return []; }
+    return data || [];
+  }
+  async insertShared(table, row, hid) {
+    const { data, error } = await this.sb.from(table).insert({ ...row, user_id: this.uid, household_id: hid }).select().single();
+    if (error) { console.error(`${table} (közös) mentés hiba:`, error.message); throw error; }
+    return data;
+  }
+  async getHousehold() {
+    const { data: hs } = await this.sb.from("households").select("*").limit(1);
+    if (!hs || !hs.length) return null;
+    const h = hs[0];
+    const { data: members } = await this.sb.from("household_members").select("*").eq("household_id", h.id);
+    return { ...h, members: members || [] };
+  }
+  async createInvite() {
+    const { data, error } = await this.sb.rpc("mm_create_invite");
+    if (error) throw error;
+    return data;
+  }
+  async joinHousehold(code) {
+    const { data, error } = await this.sb.rpc("mm_join", { p_code: code });
+    if (error) throw error;
+    return data;
+  }
+  async leaveHousehold(hid) {
+    const { error } = await this.sb.rpc("mm_leave", { p_hid: hid });
+    if (error) throw error;
+  }
+  async listContributions(hid) {
+    const { data, error } = await this.sb.from("shared_contributions").select("*").eq("household_id", hid);
+    if (error) { console.error("hozzájárulások hiba:", error.message); return []; }
+    return data || [];
+  }
+  async addContribution(row) {
+    const { error } = await this.sb.from("shared_contributions").insert({ ...row, user_id: this.uid });
+    if (error) throw error;
   }
   async getProfile() {
     const { data } = await this.sb.from("profiles").select("*").eq("id", this.uid).maybeSingle();
@@ -118,6 +180,17 @@ class SupaStore {
   }
   async setProfile(patch) {
     await this.sb.from("profiles").upsert({ id: this.uid, ...patch });
+  }
+  async convertAll(factor) {
+    const r = (n) => Math.round((Number(n) || 0) * factor * 100) / 100;
+    const tx = await this.list("transactions");
+    for (const t of tx) await this.update("transactions", t.id, { amount: r(t.amount) });
+    const goals = await this.list("goals");
+    for (const g of goals) await this.update("goals", g.id, { target_amount: r(g.target_amount), start_amount: r(g.start_amount) });
+    const cats = await this.list("categories");
+    for (const c of cats) await this.update("categories", c.id, { budget: r(c.budget) });
+    const recs = await this.list("recurring");
+    for (const x of recs) await this.update("recurring", x.id, { amount: r(x.amount) });
   }
   async sendFeedback(row) {
     const { error } = await this.sb.from("feedback").insert({ ...row, user_id: this.uid });
