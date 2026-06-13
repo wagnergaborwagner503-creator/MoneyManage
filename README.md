@@ -3,6 +3,8 @@
 Telefonra telepíthető webalkalmazás (PWA) a havi pénzügyeid tervezéséhez és követéséhez.
 
 **Funkciók:**
+- 🎨 Modern fintech design **világos és sötét témával** (váltó a beállításokban + automatikus rendszerkövetés), letisztult monochrome ikonokkal
+- 💱 Választható pénznem (Ft, €, $, £, lei, Fr) – magyar számformázással (ezres-tagolás, elkülönített tizedesek), a valuta az összeg-beviteknél is megjelenik
 - 📋 Havi költségvetés tervezése kategóriánként (keretek + túlköltés-jelzés)
 - 🧾 Kiadások / bevételek / megtakarítások rögzítése okos bevitellel („12k" = 12 000 Ft, kategória-javaslat a megnevezés alapján, gyorsösszeg gombok)
 - 🔁 Ismétlődő tételek tetszőleges gyakorisággal: naponta / hetente / havonta / évente, sőt „3 hetente" is – automatikus könyveléssel

@@ -5,25 +5,38 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>MoneyManage – Havi pénzügyek okosan</title>
   <meta name="description" content="MoneyManage (MM) – Tervezd meg a havi költségvetésed, kövesd a kiadásaid, érd el a céljaid.">
-  <meta name="theme-color" content="#2563eb">
+  <meta name="theme-color" content="#2563eb" id="meta-theme">
   <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="icons/icon.svg">
   <link rel="icon" type="image/png" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="MM">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/style.css">
+  <script>
+    // Téma alkalmazása még az első festés előtt (nincs villanás)
+    (function () {
+      try {
+        var s = JSON.parse(localStorage.getItem("mm_settings") || "{}");
+        var mode = s.theme || "system";
+        var dark = mode === "dark" || (mode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+      } catch (e) { document.documentElement.dataset.theme = "light"; }
+    })();
+  </script>
 </head>
 <body>
 
   <!-- ============ AUTH SCREEN ============ -->
   <div id="auth-screen" class="auth-screen hidden">
+    <div class="auth-bg"></div>
     <div class="auth-card">
       <div class="auth-logo">
-        <div class="logo-badge">MM</div>
+        <div class="logo-badge"><i data-lucide="wallet"></i></div>
         <h1>MoneyManage</h1>
         <p class="auth-tagline">Tervezd meg a hónapod. Ne érjen meglepetés.</p>
       </div>
@@ -36,15 +49,15 @@
       <form id="auth-form" class="auth-form">
         <div class="field" id="auth-name-field" style="display:none">
           <label for="auth-name">Név</label>
-          <input type="text" id="auth-name" placeholder="Pl. Kiss Anna" autocomplete="name">
+          <div class="input-wrap"><i data-lucide="user"></i><input type="text" id="auth-name" placeholder="Pl. Kiss Anna" autocomplete="name"></div>
         </div>
         <div class="field">
           <label for="auth-email">E-mail</label>
-          <input type="email" id="auth-email" placeholder="te@email.hu" autocomplete="email" required>
+          <div class="input-wrap"><i data-lucide="mail"></i><input type="email" id="auth-email" placeholder="te@email.hu" autocomplete="email" required></div>
         </div>
         <div class="field">
           <label for="auth-password">Jelszó</label>
-          <input type="password" id="auth-password" placeholder="••••••••" autocomplete="current-password" required minlength="6">
+          <div class="input-wrap"><i data-lucide="lock"></i><input type="password" id="auth-password" placeholder="••••••••" autocomplete="current-password" required minlength="6"></div>
         </div>
         <div id="auth-error" class="auth-error hidden"></div>
         <button type="submit" class="btn btn-primary btn-block" id="auth-submit">Bejelentkezés</button>
@@ -52,8 +65,8 @@
       </form>
 
       <div class="auth-divider"><span>vagy</span></div>
-      <button class="btn btn-ghost btn-block" id="btn-local-mode">📱 Kipróbálás fiók nélkül (helyi mód)</button>
-      <p class="auth-note" id="auth-config-note" style="display:none">⚠️ A Supabase nincs beállítva (js/config.js), ezért csak a helyi mód érhető el. Lásd: README.md</p>
+      <button class="btn btn-ghost btn-block" id="btn-local-mode"><i data-lucide="smartphone"></i> Kipróbálás fiók nélkül</button>
+      <p class="auth-note" id="auth-config-note" style="display:none">A Supabase nincs beállítva (js/config.js), ezért csak a helyi mód érhető el. Lásd: README.md</p>
     </div>
   </div>
 
@@ -63,16 +76,16 @@
     <!-- Sidebar (desktop) -->
     <aside class="sidebar">
       <div class="sidebar-logo">
-        <div class="logo-badge">MM</div>
+        <div class="logo-badge"><i data-lucide="wallet"></i></div>
         <span>MoneyManage</span>
       </div>
       <nav class="sidebar-nav">
-        <button class="nav-item active" data-view="dashboard"><span class="nav-ico">🏠</span> Áttekintés</button>
-        <button class="nav-item" data-view="transactions"><span class="nav-ico">🧾</span> Tranzakciók</button>
-        <button class="nav-item" data-view="budget"><span class="nav-ico">📋</span> Költségvetés</button>
-        <button class="nav-item" data-view="goals"><span class="nav-ico">🎯</span> Célok</button>
-        <button class="nav-item" data-view="stats"><span class="nav-ico">📊</span> Statisztikák</button>
-        <button class="nav-item" data-view="profile"><span class="nav-ico">👤</span> Profil</button>
+        <button class="nav-item active" data-view="dashboard"><i data-lucide="layout-dashboard"></i> Áttekintés</button>
+        <button class="nav-item" data-view="transactions"><i data-lucide="receipt-text"></i> Tranzakciók</button>
+        <button class="nav-item" data-view="budget"><i data-lucide="wallet"></i> Költségvetés</button>
+        <button class="nav-item" data-view="goals"><i data-lucide="target"></i> Célok</button>
+        <button class="nav-item" data-view="stats"><i data-lucide="chart-column"></i> Statisztikák</button>
+        <button class="nav-item" data-view="profile"><i data-lucide="user"></i> Profil</button>
       </nav>
       <div class="sidebar-footer">
         <span id="sidebar-user" class="sidebar-user"></span>
@@ -81,22 +94,18 @@
 
     <!-- Main content -->
     <main class="main">
-      <!-- Top bar with month selector -->
       <header class="topbar">
         <div class="month-nav">
-          <button class="month-btn" id="month-prev" aria-label="Előző hónap">‹</button>
+          <button class="icon-btn-round" id="month-prev" aria-label="Előző hónap"><i data-lucide="chevron-left"></i></button>
           <button class="month-label" id="month-label">2026. június</button>
-          <button class="month-btn" id="month-next" aria-label="Következő hónap">›</button>
+          <button class="icon-btn-round" id="month-next" aria-label="Következő hónap"><i data-lucide="chevron-right"></i></button>
         </div>
         <div class="topbar-actions">
-          <button class="icon-round mobile-only" data-view="budget" title="Költségvetés">📋</button>
-          <button class="icon-round mobile-only" data-view="profile" title="Profil">👤</button>
-          <button class="btn btn-primary btn-sm" id="btn-quick-add">+ Új tétel</button>
+          <button class="btn btn-primary btn-sm topbar-add" id="btn-quick-add"><i data-lucide="plus"></i> Új tétel</button>
         </div>
       </header>
 
       <div id="view-container" class="view-container">
-        <!-- Views are rendered by JS -->
         <section id="view-dashboard" class="view"></section>
         <section id="view-transactions" class="view hidden"></section>
         <section id="view-budget" class="view hidden"></section>
@@ -108,14 +117,12 @@
 
     <!-- Bottom nav (mobile) -->
     <nav class="bottom-nav">
-      <button class="bnav-item active" data-view="dashboard"><span>🏠</span>Áttekintés</button>
-      <button class="bnav-item" data-view="transactions"><span>🧾</span>Tételek</button>
-      <button class="bnav-fab" id="btn-fab" aria-label="Új tétel">+</button>
-      <button class="bnav-item" data-view="goals"><span>🎯</span>Célok</button>
-      <button class="bnav-item" data-view="stats"><span>📊</span>Statisztika</button>
+      <button class="bnav-item active" data-view="dashboard"><i data-lucide="layout-dashboard"></i><span>Áttekintés</span></button>
+      <button class="bnav-item" data-view="stats"><i data-lucide="chart-column"></i><span>Statisztika</span></button>
+      <button class="bnav-fab" id="btn-fab" aria-label="Új tétel"><i data-lucide="plus"></i></button>
+      <button class="bnav-item" data-view="transactions"><i data-lucide="receipt-text"></i><span>Tételek</span></button>
+      <button class="bnav-item" data-view="profile"><i data-lucide="user"></i><span>Profil</span></button>
     </nav>
-
-    <!-- More menu for mobile (budget + profile) -->
   </div>
 
   <!-- ============ MODAL ============ -->
@@ -123,7 +130,7 @@
     <div class="modal" id="modal">
       <div class="modal-header">
         <h3 id="modal-title">Új tétel</h3>
-        <button class="modal-close" id="modal-close">✕</button>
+        <button class="modal-close" id="modal-close" aria-label="Bezárás"><i data-lucide="x"></i></button>
       </div>
       <div class="modal-body" id="modal-body"></div>
     </div>
@@ -134,6 +141,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.47.10/dist/umd/supabase.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.469.0/dist/umd/lucide.min.js"></script>
   <script src="js/config.js"></script>
   <script src="js/data.js"></script>
   <script src="js/app.js"></script>

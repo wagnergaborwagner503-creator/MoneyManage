@@ -5,14 +5,14 @@
 // Táblák: categories, transactions, goals, recurring
 
 const DEFAULT_CATEGORIES = [
-  { name: "Lakhatás",      icon: "🏠", color: "#2563eb", budget: 0 },
-  { name: "Élelmiszer",    icon: "🛒", color: "#16a34a", budget: 0 },
-  { name: "Közlekedés",    icon: "🚌", color: "#d97706", budget: 0 },
-  { name: "Szórakozás",    icon: "🎉", color: "#9333ea", budget: 0 },
-  { name: "Egészség",      icon: "💊", color: "#dc2626", budget: 0 },
-  { name: "Ruházat",       icon: "👕", color: "#0891b2", budget: 0 },
-  { name: "Előfizetések",  icon: "📱", color: "#4f46e5", budget: 0 },
-  { name: "Egyéb",         icon: "📦", color: "#64748b", budget: 0 },
+  { name: "Lakhatás",      icon: "house",         color: "#2563eb", budget: 0 },
+  { name: "Élelmiszer",    icon: "shopping-cart", color: "#16a34a", budget: 0 },
+  { name: "Közlekedés",    icon: "bus",           color: "#d97706", budget: 0 },
+  { name: "Szórakozás",    icon: "party-popper",  color: "#9333ea", budget: 0 },
+  { name: "Egészség",      icon: "pill",          color: "#dc2626", budget: 0 },
+  { name: "Ruházat",       icon: "shirt",         color: "#0891b2", budget: 0 },
+  { name: "Előfizetések",  icon: "smartphone",    color: "#4f46e5", budget: 0 },
+  { name: "Egyéb",         icon: "package",       color: "#64748b", budget: 0 },
 ];
 
 // Kulcsszó → kategória javaslat (okos bevitel)
