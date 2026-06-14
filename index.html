@@ -119,7 +119,13 @@
           <button class="month-label" id="month-label">2026. június</button>
           <button class="icon-btn-round" id="month-next" aria-label="Következő hónap"><i data-lucide="chevron-right"></i></button>
         </div>
-        <button class="btn btn-primary btn-sm topbar-add" id="btn-quick-add"><i data-lucide="plus"></i> Új tétel</button>
+        <div class="monthbar-right">
+          <div class="acct-switch hidden" id="acct-switch">
+            <button data-acct="self"><i data-lucide="user"></i><span>Saját</span></button>
+            <button data-acct="shared"><i data-lucide="users"></i><span>Közös</span></button>
+          </div>
+          <button class="btn btn-primary btn-sm topbar-add" id="btn-quick-add"><i data-lucide="plus"></i> Új tétel</button>
+        </div>
       </div>
 
       <div id="view-container" class="view-container">

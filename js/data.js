@@ -55,6 +55,7 @@ class LocalStore {
       this._save();
     }
   }
+  setCtx() { /* helyi módban nincs közös fiók */ }
   async list(table) { return [...(this.data[table] || [])]; }
   async insert(table, row) {
     const rec = { id: uuid(), created_at: new Date().toISOString(), ...row };
@@ -101,7 +102,11 @@ class SupaStore {
     this.sb = client;
     this.uid = userId;
     this.mode = "cloud";
+    this.ctxHousehold = null;   // ha be van állítva, a megosztható táblák a közös fiókra mennek
   }
+  setCtx(hid) { this.ctxHousehold = hid || null; }
+  // Megosztható táblák (a recurring mindig személyes marad)
+  _shareable(table) { return ["transactions", "categories", "goals"].includes(table); }
   async init() {
     const cats = await this.list("categories");
     if (!cats.length) {
@@ -111,15 +116,21 @@ class SupaStore {
     }
   }
   async list(table) {
-    // Személyes nézet: a közös (household_id-vel ellátott) tételek NEM jelennek meg itt
+    // Közös nézet: a household tételei; személyes nézet: a sajátok (household_id null)
+    if (this.ctxHousehold && this._shareable(table)) {
+      const { data, error } = await this.sb.from(table).select("*").eq("household_id", this.ctxHousehold);
+      if (error) { console.error(`${table} (közös) lekérés hiba:`, error.message); return []; }
+      return data || [];
+    }
     let q = this.sb.from(table).select("*").eq("user_id", this.uid);
-    if (["transactions", "categories", "goals"].includes(table)) q = q.is("household_id", null);
+    if (this._shareable(table)) q = q.is("household_id", null);
     const { data, error } = await q;
     if (error) { console.error(`${table} lekérés hiba:`, error.message); return []; }
     return data || [];
   }
   async insert(table, row) {
-    const { data, error } = await this.sb.from(table).insert({ ...row, user_id: this.uid }).select().single();
+    const extra = (this.ctxHousehold && this._shareable(table)) ? { household_id: this.ctxHousehold } : {};
+    const { data, error } = await this.sb.from(table).insert({ ...row, user_id: this.uid, ...extra }).select().single();
     if (error) { console.error(`${table} mentés hiba:`, error.message); throw error; }
     return data;
   }

@@ -13,6 +13,7 @@ const state = {
   month: new Date(),   // kiválasztott hónap
   view: "dashboard",
   household: null,     // közös fiók (ha össze van csatolva), felhő módban
+  account: "self",     // melyik számlát kezeljük: "self" (saját) | "shared" (közös)
   cache: { categories: [], transactions: [], goals: [], recurring: [], profile: {}, sharedGoals: [], sharedTx: [], contributions: [] },
   charts: {},
   deferredInstall: null,
@@ -280,34 +281,120 @@ function goalSaved(goal) {
       .reduce((s, t) => s + Number(t.amount || 0), 0);
 }
 
+// ---------- Előző hónapból átvitt maradék ----------
+// A hónap kezdete ELŐTTI összes tétel nettója (bevétel − kiadás − megtakarítás).
+function carryoverInto(d = state.month) {
+  const start = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+  let sum = 0;
+  for (const t of state.cache.transactions) {
+    if ((t.date || "") >= start) continue;
+    const a = Number(t.amount) || 0;
+    if (t.type === "income") sum += a; else sum -= a; // kiadás és megtakarítás is csökkenti a maradékot
+  }
+  return sum;
+}
+
+// ---------- Okos előrejelzés (szokások + rendszeresség) ----------
+// Még nem könyvelt, ütemezett ismétlődő tételek a hónap hátralévő részében.
+function upcomingRecurring(typeFilter, d = state.month) {
+  if (!isCurrentMonth(d)) return 0;
+  const monthEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0); monthEnd.setHours(0, 0, 0, 0);
+  const todayD = today0();
+  let sum = 0;
+  for (const r of state.cache.recurring) {
+    if (!r.active) continue;
+    if (typeFilter && r.type !== typeFilter) continue;
+    const anchor = recurringAnchor(r); if (!anchor || isNaN(anchor)) continue;
+    const unit = r.interval_unit || "month", count = Math.max(1, Number(r.interval_count || 1));
+    for (let n = 0, g = 0; g < 1000; n++, g++) {
+      const occ = occurrenceDate(anchor, unit, count, n); occ.setHours(0, 0, 0, 0);
+      if (occ > monthEnd) break;
+      if (occ > todayD) {
+        const occStr = isoDate(occ);
+        if (!state.cache.transactions.some(t => t.recurring_id === r.id && t.date === occStr)) sum += Number(r.amount) || 0;
+      }
+    }
+  }
+  return sum;
+}
+// A hónap várható összes kiadása: könyvelt + hátralévő ismétlődő + tervezett (pending) + napi szokás-kivetítés.
+function projectMonthExpense(d = state.month) {
+  const txReal = realizedOfMonth(d);
+  const realizedExp = sumBy(txReal, "expense");
+  if (!isCurrentMonth(d)) return realizedExp;
+  const dim = daysInMonth(d), elapsed = new Date().getDate(), remaining = Math.max(0, dim - elapsed);
+  const casualRealized = txReal.filter(t => t.type === "expense" && !t.recurring_id).reduce((s, t) => s + Number(t.amount), 0);
+  const dailyRate = elapsed > 0 ? casualRealized / elapsed : 0;
+  const pendingExp = sumBy(txOfMonth(d).filter(isPending), "expense"); // tervezett, kézi
+  return realizedExp + dailyRate * remaining + upcomingRecurring("expense", d) + pendingExp;
+}
+function projectMonthIncome(d = state.month) {
+  const incAll = sumBy(txOfMonth(d), "income"); // realized + pending
+  if (!isCurrentMonth(d)) return incAll;
+  return incAll + upcomingRecurring("income", d);
+}
+// Halmozott napi kivetítés a hónap végéig (statisztika szaggatott vonalához)
+function projectedCumulative(d = state.month) {
+  const dim = daysInMonth(d);
+  const daily = new Array(dim).fill(0);
+  realizedOfMonth(d).filter(t => t.type === "expense").forEach(t => { const day = parseInt(t.date.slice(8, 10), 10); if (day >= 1 && day <= dim) daily[day - 1] += Number(t.amount); });
+  if (isCurrentMonth(d)) {
+    const elapsed = new Date().getDate();
+    const casualRealized = realizedOfMonth(d).filter(t => t.type === "expense" && !t.recurring_id).reduce((s, t) => s + Number(t.amount), 0);
+    const dailyRate = elapsed > 0 ? casualRealized / elapsed : 0;
+    // jövőbeli napokra: napi szokás + esedékes ismétlődő + tervezett az adott napon
+    const monthEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0); monthEnd.setHours(0, 0, 0, 0);
+    for (let day = elapsed + 1; day <= dim; day++) {
+      daily[day - 1] += dailyRate;
+      const ds = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+      // tervezett (pending) kézi kiadások ezen a napon
+      txOfMonth(d).filter(t => isPending(t) && t.type === "expense" && t.date === ds).forEach(t => daily[day - 1] += Number(t.amount));
+      // esedékes ismétlődő kiadások ezen a napon
+      for (const r of state.cache.recurring) {
+        if (!r.active || r.type !== "expense") continue;
+        const anchor = recurringAnchor(r); if (!anchor || isNaN(anchor)) continue;
+        const unit = r.interval_unit || "month", count = Math.max(1, Number(r.interval_count || 1));
+        for (let n = 0, g = 0; g < 1000; n++, g++) { const occ = occurrenceDate(anchor, unit, count, n); occ.setHours(0, 0, 0, 0); if (occ > monthEnd) break; if (isoDate(occ) === ds && !state.cache.transactions.some(t => t.recurring_id === r.id && t.date === ds)) daily[day - 1] += Number(r.amount); }
+      }
+    }
+  }
+  let run = 0; return daily.map(v => (run += v));
+}
+
 async function refreshCache() {
+  // 1) Közös fiók lekérése (cloud) – előbb, hogy beállíthassuk a kontextust
+  let household = null;
+  if (state.store.mode === "cloud") {
+    try { household = await state.store.getHousehold(); } catch (e) { /* sharing nincs beállítva */ }
+  }
+  state.household = household;
+  if (state.account === "shared" && !household) state.account = "self"; // nincs közös fiók → saját
+  // a tároló kontextusa: közös nézetben a household tételeit kezeljük
+  state.store.setCtx(state.account === "shared" && household ? household.id : null);
+
   const [categories, transactions, goals, recurring, profile] = await Promise.all([
     state.store.list("categories"),
     state.store.list("transactions"),
     state.store.list("goals"),
-    state.store.list("recurring"),
+    state.store.list("recurring"),   // a recurring mindig személyes
     state.store.getProfile(),
   ]);
   categories.sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0));
   transactions.sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.created_at || "").localeCompare(a.created_at || ""));
 
-  // Közös fiók (csak felhő módban; ha a sharing séma nincs lefuttatva, csendben kihagyjuk)
-  let household = null, sharedGoals = [], sharedTx = [], contributions = [];
-  if (state.store.mode === "cloud") {
+  // Közös kassza adatai: a SAJÁT nézet aljára (összefoglaló), és a közös cél hozzájárulások a goalSaved-hez
+  let sharedGoals = [], sharedTx = [], contributions = [];
+  if (household) {
     try {
-      household = await state.store.getHousehold();
-      if (household) {
-        const hid = household.id;
-        [sharedGoals, sharedTx, contributions] = await Promise.all([
-          state.store.listShared("goals", hid),
-          state.store.listShared("transactions", hid),
-          state.store.listContributions(hid),
-        ]);
-        sharedTx.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
-      }
-    } catch (e) { /* a közös funkció nem elérhető – kihagyjuk */ }
+      const hid = household.id;
+      [sharedGoals, sharedTx, contributions] = await Promise.all([
+        state.store.listShared("goals", hid),
+        state.store.listShared("transactions", hid),
+        state.store.listContributions(hid),
+      ]);
+      sharedTx.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+    } catch (e) { /* kihagyjuk */ }
   }
-  state.household = household;
   state.cache = { categories, transactions, goals, recurring, profile, sharedGoals, sharedTx, contributions };
 }
 
@@ -317,6 +404,9 @@ async function refreshCache() {
 // így egy adott előfordulás SOHA nem kerül be kétszer – frissítéskor sem.
 async function applyRecurring() {
   const today = today0();
+  // Az ismétlődő tételek MINDIG a személyes számlára könyvelődnek (közös nézetben se a household-ba)
+  const prevCtx = state.store.ctxHousehold;
+  if (state.store.setCtx) state.store.setCtx(null);
   // Helyi munkapéldány, hogy a cikluson belül felvett tételeket is lássa a dedup
   const booked = new Set(
     state.cache.transactions
@@ -345,6 +435,7 @@ async function applyRecurring() {
       added++;
     }
   }
+  if (state.store.setCtx) state.store.setCtx(prevCtx || null); // kontextus visszaállítása
   if (added) {
     await refreshCache();
     toast(`${added} ismétlődő tétel automatikusan könyvelve`, "check");
@@ -497,7 +588,21 @@ function updateAppbar() {
   if (av) av.textContent = initial;
   const hb = $("#btn-hide");
   if (hb) hb.innerHTML = `<i data-lucide="${state.hideAmounts ? "eye-off" : "eye"}"></i>`;
+  updateAcctSwitch();
   drawIcons();
+}
+
+// Saját / Közös számla-váltó (csak ha van összecsatolt közös fiók)
+function updateAcctSwitch() {
+  const sw = $("#acct-switch");
+  if (!sw) return;
+  // Felhő módban mindig látszik (társ nélkül a "Közös" a Profil összecsatoláshoz visz)
+  if (state.store && state.store.mode === "cloud") {
+    sw.classList.remove("hidden");
+    sw.querySelectorAll("button").forEach(b => b.classList.toggle("active", b.dataset.acct === state.account));
+  } else {
+    sw.classList.add("hidden");
+  }
 }
 
 // ============ NAVIGÁCIÓ ============
@@ -519,6 +624,16 @@ function bindNav() {
     updateAppbar();
     renderView();
   };
+  // Saját / Közös számla váltása
+  $("#acct-switch").querySelectorAll("button").forEach(b => b.onclick = async () => {
+    const acct = b.dataset.acct;
+    if (acct === state.account) return;
+    if (acct === "shared" && !state.household) { switchView("profile"); toast("Előbb csatold össze a fiókod egy társsal a Profilban"); return; }
+    state.account = acct;
+    await refreshCache();
+    if (state.view === "dashboard") renderView(); else switchView("dashboard");
+    toast(acct === "shared" ? "Közös számla" : "Saját számla", "check");
+  });
 }
 
 function switchView(view) {
@@ -556,7 +671,8 @@ function renderDashboard(el) {
   const incomeAll = sumBy(txAll, "income");
   const expenseAll = sumBy(txAll, "expense");
   const savingAll = sumBy(txAll, "saving");
-  const balance = incomeAll - expenseAll - savingAll;
+  const carry = carryoverInto();   // előző hónapból átvitt maradék
+  const balance = carry + incomeAll - expenseAll - savingAll;
   const pendingCount = txAll.filter(isPending).length;
   const plannedExpense = expenseAll - expenseR;
   const plannedIncome = incomeAll - incomeR;
@@ -570,10 +686,9 @@ function renderDashboard(el) {
 
   let projHtml = "";
   if (cur) {
-    const elapsed = now.getDate();
-    const projected = elapsed > 0 ? (expenseR / elapsed) * dim : 0;
-    const projBalance = incomeAll - projected - savingAll;
-    projHtml = `<div class="banner ${projBalance < 0 ? "warn" : "info"}">${ic("calculator")}<div><b>Hó végi előrejelzés:</b> a jelenlegi tempóban kb. ${fmt(projected)} lesz az összes kiadásod, így várhatóan <b>${fmt(projBalance)}</b> marad a hónap végén.</div></div>`;
+    const projected = projectMonthExpense();          // szokás + rendszeresség alapján
+    const projBalance = carry + projectMonthIncome() - projected - savingAll;
+    projHtml = `<div class="banner ${projBalance < 0 ? "warn" : "info"}">${ic("calculator")}<div><b>Hó végi előrejelzés:</b> szokásaid és a rendszeres tételeid alapján kb. <b>${fmt(projected)}</b> lesz az összes kiadásod, így várhatóan <b>${fmt(projBalance)}</b> marad a hónap végén.</div></div>`;
   }
 
   const pendingBanner = pendingCount ? `<div class="banner info">${ic("calendar-clock")}<div><b>${pendingCount} tervezett tétel</b> ebben a hónapban – a hó végi egyenlegbe beleszámítanak, a statisztikába még nem. A Tételek fülön pipáld ki őket, amint megtörténtek.</div></div>` : "";
@@ -616,9 +731,12 @@ function renderDashboard(el) {
 
   el.innerHTML = `
     <div class="hero">
-      <div class="hero-label">${ic("wallet")} Hó végén marad</div>
+      <div class="hero-label">${ic("wallet")} Hó végén marad${state.account === "shared" ? " · közös" : ""}</div>
       <div class="hero-balance">${fmtHTML(balance)}</div>
-      <div class="hero-sub ${balance < 0 ? "neg" : ""}">${ic(cur ? "calendar-range" : "calendar")} ${cur ? `Napi keret: ${fmt(daily)}` : monthLabel(state.month)}</div>
+      <div class="hero-subrow">
+        <div class="hero-sub ${balance < 0 ? "neg" : ""}">${ic(cur ? "calendar-range" : "calendar")} ${cur ? `Napi keret: ${fmt(daily)}` : monthLabel(state.month)}</div>
+        ${carry ? `<div class="hero-sub">${ic("history")} Előző hónapból: ${fmt(carry, { plus: true })}</div>` : ""}
+      </div>
     </div>
 
     <div class="quick-actions">
@@ -878,12 +996,13 @@ function goalCardHtml(g) {
 
 function renderGoals(el) {
   const hh = state.household;
+  const showShared = hh && state.account === "self";   // közös szekciók csak saját nézetben (közös nézetben a fő lista MÁR a közös)
   const personalCards = state.cache.goals.map(goalCardHtml).join("");
   const sharedCards = (state.cache.sharedGoals || []).map(goalCardHtml).join("");
 
-  // Közös kassza kártya (közös kiadások e hónapban)
+  // Közös kassza kártya (közös kiadások e hónapban) – csak saját nézetben
   let kasszaHtml = "";
-  if (hh) {
+  if (showShared) {
     const stx = (state.cache.sharedTx || []).filter(t => (t.date || "").startsWith(monthKey(state.month)) && t.type === "expense");
     const total = stx.reduce((s, t) => s + Number(t.amount), 0);
     const list = stx.slice(0, 6).map(t => {
@@ -902,10 +1021,10 @@ function renderGoals(el) {
   }
 
   el.innerHTML = `
-    <div class="section-title">Célok</div>
+    <div class="section-title">Célok${state.account === "shared" ? " · közös" : ""}</div>
     ${kasszaHtml}
-    ${hh && sharedCards ? `<div class="card-title" style="margin:6px 2px 8px">Közös célok</div>${sharedCards}` : ""}
-    ${hh ? `<div class="card-title" style="margin:16px 2px 8px">Saját célok</div>` : ""}
+    ${showShared && sharedCards ? `<div class="card-title" style="margin:6px 2px 8px">Közös célok</div>${sharedCards}` : ""}
+    ${showShared ? `<div class="card-title" style="margin:16px 2px 8px">Saját célok</div>` : ""}
     ${personalCards || `<div class="empty-state"><div class="empty-ico">${ic("target")}</div><p>Még nincs célod.<br>Mire gyűjtenél? Nyaralás, autó, vésztartalék?</p></div>`}
     <button class="btn btn-primary btn-block" id="btn-add-goal">${ic("plus")} Új cél hozzáadása</button>
   `;
@@ -1097,13 +1216,16 @@ function renderStats(el) {
   const cumul = (m) => { const dim = daysInMonth(m); const daily = new Array(dim).fill(0); realizedOfMonth(m).filter(t => t.type === "expense").forEach(t => { const day = parseInt(t.date.slice(8, 10), 10); if (day >= 1 && day <= dim) daily[day - 1] += Number(t.amount); }); let run = 0; return daily.map(v => (run += v)); };
   const curC = cumul(state.month), prevC = cumul(prevMonth);
   const maxDays = Math.max(curC.length, prevC.length);
-  let curTrim = curC; if (isCurrentMonth(state.month)) curTrim = curC.slice(0, new Date().getDate());
+  const isCur = isCurrentMonth(state.month);
+  let curTrim = curC; if (isCur) curTrim = curC.slice(0, new Date().getDate());
+  const lineSets = [
+    { label: monthLabel(state.month), data: curTrim, borderColor: C.primary, backgroundColor: "transparent", fill: false, tension: .35, pointRadius: 0, borderWidth: 2.5 },
+  ];
+  if (isCur) lineSets.push({ label: "Előrejelzés (hó vége)", data: projectedCumulative(state.month), borderColor: C.primary, borderDash: [5, 5], backgroundColor: "transparent", fill: false, tension: .35, pointRadius: 0, borderWidth: 2 });
+  lineSets.push({ label: monthLabel(prevMonth), data: prevC, borderColor: C.muted, borderDash: [2, 4], fill: false, tension: .35, pointRadius: 0, borderWidth: 1.5 });
   state.charts.line = new Chart($("#chart-line"), {
     type: "line",
-    data: { labels: Array.from({ length: maxDays }, (_, i) => i + 1), datasets: [
-      { label: monthLabel(state.month), data: curTrim, borderColor: C.primary, backgroundColor: "transparent", fill: false, tension: .35, pointRadius: 0, borderWidth: 2.5 },
-      { label: monthLabel(prevMonth), data: prevC, borderColor: C.muted, borderDash: [5, 5], fill: false, tension: .35, pointRadius: 0, borderWidth: 2 },
-    ]},
+    data: { labels: Array.from({ length: maxDays }, (_, i) => i + 1), datasets: lineSets },
     options: { responsive: true, maintainAspectRatio: false,
       plugins: { legend: { position: "bottom", labels: { boxWidth: 12, color: C.muted, font: { family: "Inter", size: 12 } } },
         tooltip: { callbacks: { label: (c) => ` ${c.dataset.label}: ${fmt(c.parsed.y)}` } } },
@@ -1163,14 +1285,13 @@ function renderProfile(el) {
 
     <div class="card">
       <div class="card-title">Pénznem</div>
-      <div class="setting-row" style="border:none;padding-bottom:0">
-        <div class="setting-ico">${ic("circle-dollar-sign")}</div>
-        <div class="grow"><div class="t">Megjelenített valuta</div><div class="s">Minden összeg ebben jelenik meg</div></div>
-        <select id="cur-select" style="width:auto;padding:11px 13px;border:1.5px solid var(--border);border-radius:12px;background:var(--surface-2);font-weight:600">
+      <div class="field" style="margin-bottom:0">
+        <label>Megjelenített valuta</label>
+        <div class="input-wrap">${ic("circle-dollar-sign")}<select id="cur-select">
           ${Object.entries(CURRENCIES).map(([k, c]) => `<option value="${k}" ${k === curCode ? "selected" : ""}>${esc(c.label)}</option>`).join("")}
-        </select>
+        </select></div>
+        <p class="field-hint">Fő (tárolási) pénznem: <b>${esc(CURRENCIES[baseCurrency()].label)}</b>. Váltáskor csak a megjelenítés változik a mai árfolyamon – az eredeti összegek megmaradnak.</p>
       </div>
-      <p class="field-hint" style="margin-top:10px">Fő (tárolási) pénznem: <b>${esc(CURRENCIES[baseCurrency()].label)}</b>. A megjelenítés a mai árfolyamon vált, az eredeti összegek megmaradnak (visszaváltáskor pontosan visszajönnek).</p>
     </div>
 
     <div class="card">
