@@ -165,8 +165,12 @@ input, select, textarea { font-family: inherit; font-size: 16px; color: var(--te
 .field { margin-bottom: 15px; }
 .field label { display: block; font-size: 13px; font-weight: 600; color: var(--text-muted); margin-bottom: 7px; }
 .input-wrap { position: relative; display: flex; align-items: center; }
-.input-wrap .lucide { position: absolute; left: 14px; width: 19px; height: 19px; color: var(--text-faint); pointer-events: none; }
-.input-wrap input { padding-left: 42px !important; }
+.input-wrap > .lucide { position: absolute; left: 14px; width: 19px; height: 19px; color: var(--text-faint); pointer-events: none; }
+.input-wrap input, .input-wrap select { padding-left: 42px !important; }
+.input-wrap input[type="password"], .input-wrap input#auth-password { padding-right: 46px !important; }
+.pw-toggle { position: absolute; right: 8px; width: 34px; height: 34px; border: none; background: none; color: var(--text-faint); display: flex; align-items: center; justify-content: center; border-radius: 9px; }
+.pw-toggle:hover { color: var(--primary); }
+.pw-toggle .lucide { width: 19px; height: 19px; }
 .field input, .field select, .field textarea {
   width: 100%; padding: 13px 15px; border: 1.5px solid var(--border); border-radius: 13px;
   background: var(--surface-2); color: var(--text); transition: border-color .15s, box-shadow .15s, background .15s;
@@ -196,16 +200,28 @@ input, select, textarea { font-family: inherit; font-size: 16px; color: var(--te
 .sidebar-user { font-size: 13px; color: var(--text-muted); word-break: break-all; }
 
 .main { flex: 1; min-width: 0; margin-left: 240px; padding: 0 28px 40px; max-width: 1080px; }
-.topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 0 14px; position: sticky; top: 0; background: var(--bg); z-index: 10; }
+
+/* ============ App header (felső léc) ============ */
+.appbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 0 10px; position: sticky; top: 0; background: var(--bg); z-index: 11; }
+.appbar-brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.logo-badge.sm { width: 36px; height: 36px; margin: 0; border-radius: 11px; }
+.logo-badge.sm .lucide { width: 19px; height: 19px; }
+.appbar-name { font-weight: 800; font-size: 17px; letter-spacing: -.4px; white-space: nowrap; }
+.appbar-right { display: flex; align-items: center; gap: 8px; }
+.appbar-profile { display: flex; align-items: center; gap: 9px; border: 1px solid var(--border); background: var(--surface); border-radius: 99px; padding: 4px 4px 4px 12px; max-width: 200px; }
+.appbar-profile:hover { border-color: var(--primary); }
+.appbar-pname { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.appbar-avatar { width: 30px; height: 30px; flex-shrink: 0; border-radius: 50%; background: var(--hero-grad); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 13px; }
+
+.monthbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0 14px; position: sticky; top: 60px; background: var(--bg); z-index: 10; }
 .month-nav { display: flex; align-items: center; gap: 6px; }
 .month-label { border: none; background: none; font-size: 17px; font-weight: 700; padding: 7px 12px; border-radius: 11px; color: var(--text); letter-spacing: -.2px; }
 .month-label:hover { background: var(--surface-2); }
-.topbar-actions { display: flex; align-items: center; gap: 8px; }
 
 .view-container { padding-bottom: 96px; }
 
-/* ============ Greeting (dashboard header) ============ */
-.greet { display: flex; align-items: center; gap: 13px; margin-bottom: 18px; }
+/* ============ Greeting (profil kártya) ============ */
+.greet { display: flex; align-items: center; gap: 13px; }
 .greet-avatar { width: 46px; height: 46px; border-radius: 50%; background: var(--hero-grad); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 18px; flex-shrink: 0; box-shadow: var(--shadow-primary); }
 .greet-text { flex: 1; min-width: 0; }
 .greet-hi { font-size: 13px; color: var(--text-muted); }
@@ -417,7 +433,8 @@ input, select, textarea { font-family: inherit; font-size: 16px; color: var(--te
 .icon-btn { width: 34px; height: 34px; border: none; background: var(--surface-2); border-radius: 10px; color: var(--text-muted); display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; transition: all .15s; }
 .icon-btn .lucide { width: 16px; height: 16px; }
 .icon-btn:hover { background: var(--red-soft); color: var(--red); }
-.icon-btn.edit:hover { background: var(--primary-soft); color: var(--primary); }
+.icon-btn.edit:hover, .icon-btn.neutral:hover { background: var(--primary-soft); color: var(--primary); }
+.list-edit-row.paused { opacity: .55; }
 
 /* Settings appearance */
 .seg-theme { display: flex; gap: 8px; }
@@ -468,12 +485,16 @@ input, select, textarea { font-family: inherit; font-size: 16px; color: var(--te
   .bottom-nav { display: flex; }
   .topbar-add { display: none; }
   .row-2 { grid-template-columns: minmax(0,1fr); }
-  .topbar { padding-top: 14px; }
+  .appbar-pname { display: none; }            /* mobilon csak az avatar */
+  .appbar-profile { padding: 3px; border: none; background: none; }
+  .monthbar { top: 56px; }
+}
+@media (max-width: 360px) {
+  .appbar-name { display: none; }             /* nagyon keskeny: csak a logó */
 }
 @media (min-width: 901px) {
   .modal-overlay { align-items: center; }
   .modal { border-radius: 26px; }
-  .greet { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -1,5 +1,5 @@
 // MoneyManage service worker – offline shell cache
-const CACHE = "mm-cache-v7";
+const CACHE = "mm-cache-v8";
 const SHELL = [
   "./",
   "./index.html",

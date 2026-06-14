@@ -208,7 +208,7 @@ function parseAmount(str) {
   if (s.endsWith("k") || s.endsWith("e")) { mult = 1000; s = s.slice(0, -1); }
   else if (s.endsWith("m")) { mult = 1000000; s = s.slice(0, -1); }
   const n = parseFloat(s);
-  return isNaN(n) ? NaN : Math.round(n * mult);
+  return isNaN(n) ? NaN : Math.round(n * mult * 100) / 100;
 }
 
 // ---------- Kategória-javaslat a megnevezés alapján ----------

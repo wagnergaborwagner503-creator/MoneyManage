@@ -57,7 +57,12 @@
         </div>
         <div class="field">
           <label for="auth-password">Jelszó</label>
-          <div class="input-wrap"><i data-lucide="lock"></i><input type="password" id="auth-password" placeholder="••••••••" autocomplete="current-password" required minlength="6"></div>
+          <div class="input-wrap"><i data-lucide="lock"></i><input type="password" id="auth-password" placeholder="••••••••" autocomplete="current-password" required minlength="6"><button type="button" class="pw-toggle" id="auth-pw-toggle" aria-label="Jelszó megjelenítése"><i data-lucide="eye"></i></button></div>
+        </div>
+        <div class="field" id="auth-currency-field" style="display:none">
+          <label for="auth-currency">Fő pénznem</label>
+          <div class="input-wrap"><i data-lucide="circle-dollar-sign"></i><select id="auth-currency"></select></div>
+          <p class="field-hint">Ebben tároljuk és tervezzük a pénzügyeid. Később bármikor átválthatsz másik megjelenítésre.</p>
         </div>
         <div id="auth-error" class="auth-error hidden"></div>
         <button type="submit" class="btn btn-primary btn-block" id="auth-submit">Bejelentkezés</button>
@@ -94,16 +99,28 @@
 
     <!-- Main content -->
     <main class="main">
-      <header class="topbar">
+      <header class="appbar">
+        <div class="appbar-brand">
+          <div class="logo-badge sm"><i data-lucide="wallet"></i></div>
+          <span class="appbar-name">MoneyManage</span>
+        </div>
+        <div class="appbar-right">
+          <button class="appbar-profile" id="appbar-profile" aria-label="Profil">
+            <span class="appbar-pname" id="appbar-pname"></span>
+            <span class="appbar-avatar" id="appbar-avatar">?</span>
+          </button>
+          <button class="icon-btn-round" id="btn-hide" aria-label="Összegek elrejtése"><i data-lucide="eye"></i></button>
+          <button class="icon-btn-round" id="btn-settings" aria-label="Beállítások"><i data-lucide="settings"></i></button>
+        </div>
+      </header>
+      <div class="monthbar">
         <div class="month-nav">
           <button class="icon-btn-round" id="month-prev" aria-label="Előző hónap"><i data-lucide="chevron-left"></i></button>
           <button class="month-label" id="month-label">2026. június</button>
           <button class="icon-btn-round" id="month-next" aria-label="Következő hónap"><i data-lucide="chevron-right"></i></button>
         </div>
-        <div class="topbar-actions">
-          <button class="btn btn-primary btn-sm topbar-add" id="btn-quick-add"><i data-lucide="plus"></i> Új tétel</button>
-        </div>
-      </header>
+        <button class="btn btn-primary btn-sm topbar-add" id="btn-quick-add"><i data-lucide="plus"></i> Új tétel</button>
+      </div>
 
       <div id="view-container" class="view-container">
         <section id="view-dashboard" class="view"></section>
@@ -118,9 +135,9 @@
     <!-- Bottom nav (mobile) -->
     <nav class="bottom-nav">
       <button class="bnav-item active" data-view="dashboard"><i data-lucide="layout-dashboard"></i><span>Áttekintés</span></button>
-      <button class="bnav-item" data-view="stats"><i data-lucide="chart-column"></i><span>Statisztika</span></button>
-      <button class="bnav-fab" id="btn-fab" aria-label="Új tétel"><i data-lucide="plus"></i></button>
       <button class="bnav-item" data-view="transactions"><i data-lucide="receipt-text"></i><span>Tételek</span></button>
+      <button class="bnav-fab" id="btn-fab" aria-label="Új tétel"><i data-lucide="plus"></i></button>
+      <button class="bnav-item" data-view="stats"><i data-lucide="chart-column"></i><span>Statisztika</span></button>
       <button class="bnav-item" data-view="profile"><i data-lucide="user"></i><span>Profil</span></button>
     </nav>
   </div>

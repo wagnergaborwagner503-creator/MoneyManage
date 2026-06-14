@@ -16,6 +16,8 @@ const state = {
   cache: { categories: [], transactions: [], goals: [], recurring: [], profile: {}, sharedGoals: [], sharedTx: [], contributions: [] },
   charts: {},
   deferredInstall: null,
+  rates: null,         // árfolyam-gyorsítótár (alap → megjelenítés)
+  hideAmounts: false,  // szem-ikon: összegek elrejtése
 };
 
 // ---------- Beállítások (valuta, téma) – eszközszinten, localStorage-ben ----------
@@ -46,13 +48,56 @@ async function fetchRate(from, to) {
 function getSettings() { try { return JSON.parse(localStorage.getItem("mm_settings") || "{}"); } catch { return {}; } }
 function setSetting(k, v) { const s = getSettings(); s[k] = v; localStorage.setItem("mm_settings", JSON.stringify(s)); }
 const currentCurrency = () => (CURRENCIES[getSettings().currency] ? getSettings().currency : "HUF");
+// TÁROLÁSI (alap) pénznem – ebben tároljuk az összegeket; átváltáskor EZ nem változik (veszteségmentes visszaváltás)
+const baseCurrency = () => (CURRENCIES[getSettings().baseCurrency] ? getSettings().baseCurrency : currentCurrency());
+const MASK = "✱✱✱";   // rejtett összeg helyettesítője (csillagok)
+
+// Az alap pénznemből az összes többibe – egy hívással
+async function fetchAllRates(base) {
+  try {
+    const r = await fetch(`https://api.frankfurter.dev/v1/latest?base=${base}`);
+    if (r.ok) { const d = await r.json(); if (d.rates) return d.rates; }
+  } catch (e) { /* tartalék */ }
+  const r2 = await fetch(`https://open.er-api.com/v6/latest/${base}`);
+  if (!r2.ok) throw new Error("rate");
+  const d2 = await r2.json();
+  if (!d2.rates) throw new Error("rate");
+  return d2.rates;
+}
+// Árfolyam-gyorsítótár: state.rates = { base, date, map:{CUR:faktor} } (alap→cél)
+async function ensureRates() {
+  const base = baseCurrency(), cur = currentCurrency();
+  if (cur === base) return;
+  const today = isoDate(today0());
+  if (state.rates && state.rates.base === base && state.rates.date === today && state.rates.map && state.rates.map[cur] != null) return;
+  let cached = null;
+  try { cached = JSON.parse(localStorage.getItem("mm_rates") || "null"); } catch (e) {}
+  if (cached && cached.base === base && cached.date === today && cached.map && cached.map[cur] != null) { state.rates = cached; return; }
+  try {
+    const map = await fetchAllRates(base);
+    state.rates = { base, date: today, map };
+    localStorage.setItem("mm_rates", JSON.stringify(state.rates));
+  } catch (e) {
+    if (cached && cached.base === base && cached.map) state.rates = cached;
+  }
+}
+function displayFactor() {
+  const base = baseCurrency(), cur = currentCurrency();
+  if (cur === base) return 1;
+  if (state.rates && state.rates.base === base && state.rates.map && state.rates.map[cur] != null) return state.rates.map[cur];
+  return null;
+}
 
 // ---------- Pénz-formázás (magyar tagolás: ezresek vékony szóközzel, tizedesek elkülönítve) ----------
-const THIN = " "; // vékony szóköz az ezresekhez ("egy picit távolabb")
-function moneyParts(n, curCode = currentCurrency()) {
-  const c = CURRENCIES[curCode] || CURRENCIES.HUF;
-  const neg = Number(n) < 0;
-  const abs = Math.abs(Number(n) || 0);
+const THIN = " "; // vékony szóköz az ezresekhez ("egy picit távolabb")
+function moneyParts(baseAmount, curCode) {
+  let display = curCode || currentCurrency();
+  let factor = 1;
+  if (!curCode && display !== baseCurrency()) { const f = displayFactor(); if (f != null) factor = f; else display = baseCurrency(); }
+  const c = CURRENCIES[display] || CURRENCIES.HUF;
+  const val = (Number(baseAmount) || 0) * factor;
+  const neg = val < 0;
+  const abs = Math.abs(val);
   const nf = new Intl.NumberFormat("hu-HU", { minimumFractionDigits: c.decimals, maximumFractionDigits: c.decimals });
   let s = nf.format(abs).replace(/ /g, THIN); // NBSP → vékony szóköz
   let intPart = s, decPart = "";
@@ -64,6 +109,7 @@ function moneyParts(n, curCode = currentCurrency()) {
 }
 // Stílusozott HTML (tizedesek kisebb/halványabb, valuta jel)
 function fmtHTML(n, opts = {}) {
+  if (state.hideAmounts && !opts.force) return `<span class="money">${MASK}</span>`;
   const p = moneyParts(n, opts.cur);
   const sign = p.neg ? "−" : (opts.plus ? "+" : "");
   const cur = `<span class="m-cur">${p.symbol}</span>`;
@@ -73,10 +119,26 @@ function fmtHTML(n, opts = {}) {
 }
 // Sima szöveg (CSV, toast, input)
 function fmt(n, opts = {}) {
+  if (state.hideAmounts && !opts.force) return MASK;
   const p = moneyParts(n, opts.cur);
   const sign = p.neg ? "−" : (opts.plus ? "+" : "");
   const num = p.intPart + p.decPart;
   return p.position === "prefix" ? `${sign}${p.symbol}${num}` : `${sign}${num} ${p.symbol}`;
+}
+
+// Beírt (megjelenítési) összeg → tárolási (alap) összeg
+function parseAmountToBase(str) {
+  const v = parseAmount(str);
+  if (isNaN(v)) return v;
+  if (currentCurrency() === baseCurrency()) return v;
+  const f = displayFactor();
+  return f ? Math.round((v / f) * 100) / 100 : v;
+}
+// Tárolási (alap) összeg → megjelenítési szám (input mezőkbe, szerkesztéskor)
+function baseToDisplay(n) {
+  if (currentCurrency() === baseCurrency()) return Number(n) || 0;
+  const f = displayFactor();
+  return f ? Math.round((Number(n) || 0) * f * 100) / 100 : (Number(n) || 0);
 }
 
 // ---------- Téma ----------
@@ -105,6 +167,15 @@ function animateBars(scope) {
     scope.querySelectorAll(".bar-fill[data-h]").forEach(e => { e.style.height = (Number(e.dataset.h) || 0) + "%"; });
   }));
 }
+// Ha egy nagy összeg nem fér ki egy sorba, a tizedes részt elrejtjük (sosem törik új sorba)
+function fitMoney(scope) {
+  (scope || document).querySelectorAll(".hero-balance, .stat-value, .chart-total .amt").forEach(c => {
+    const dec = c.querySelector(".m-dec"); if (!dec) return;
+    dec.style.display = "";
+    if (c.scrollWidth > c.clientWidth + 1) dec.style.display = "none";
+  });
+}
+window.addEventListener("resize", () => { try { fitMoney(); } catch (e) {} });
 // Aktuális téma színei (Chart.js-hez)
 function themeColors() {
   const cs = getComputedStyle(document.documentElement);
@@ -304,13 +375,31 @@ function showAuth() {
   $("#app").classList.add("hidden");
   drawIcons();
 
+  // Pénznem-választó feltöltése (regisztrációhoz)
+  const curSel = $("#auth-currency");
+  if (curSel && !curSel.dataset.filled) {
+    curSel.innerHTML = Object.entries(CURRENCIES).map(([k, c]) => `<option value="${k}" ${k === "HUF" ? "selected" : ""}>${esc(c.label)}</option>`).join("");
+    curSel.dataset.filled = "1";
+  }
+  // Jelszó megjelenítése / elrejtése
+  const pwToggle = $("#auth-pw-toggle");
+  if (pwToggle) pwToggle.onclick = () => {
+    const inp = $("#auth-password");
+    const show = inp.type === "password";
+    inp.type = show ? "text" : "password";
+    pwToggle.innerHTML = `<i data-lucide="${show ? "eye-off" : "eye"}"></i>`;
+    drawIcons();
+  };
+
   let mode = "login";
   $$(".auth-tab").forEach(tab => tab.onclick = () => {
     $$(".auth-tab").forEach(t => t.classList.remove("active"));
     tab.classList.add("active");
     mode = tab.dataset.authtab;
-    $("#auth-name-field").style.display = mode === "register" ? "block" : "none";
-    $("#auth-submit").textContent = mode === "register" ? "Fiók létrehozása" : "Bejelentkezés";
+    const reg = mode === "register";
+    $("#auth-name-field").style.display = reg ? "block" : "none";
+    $("#auth-currency-field").style.display = reg ? "block" : "none";
+    $("#auth-submit").textContent = reg ? "Fiók létrehozása" : "Bejelentkezés";
     hideAuthError();
   });
 
@@ -332,6 +421,9 @@ function showAuth() {
     try {
       if (mode === "register") {
         const name = $("#auth-name").value.trim();
+        const chosenCur = CURRENCIES[$("#auth-currency").value] ? $("#auth-currency").value : "HUF";
+        setSetting("baseCurrency", chosenCur);   // a tárolási (fő) pénznem
+        setSetting("currency", chosenCur);       // és kezdetben ezt is jelenítjük meg
         const { data, error } = await state.sb.auth.signUp({ email, password, options: { data: { name } } });
         if (error) throw error;
         if (!data.session) { showAuthError("Sikeres regisztráció! Erősítsd meg az e-mail címed a kapott levélben, majd jelentkezz be.", true); return; }
@@ -377,9 +469,13 @@ async function logout() {
 async function startApp(store, user) {
   state.store = store;
   state.user = user;
+  // alap pénznem és elrejtés-állapot inicializálása
+  if (!getSettings().baseCurrency) setSetting("baseCurrency", currentCurrency());
+  state.hideAmounts = !!getSettings().hide;
   await store.init();
   await refreshCache();
   await applyRecurring();
+  await ensureRates();   // megjelenítési árfolyam (ha eltér az alaptól)
 
   $("#auth-screen").classList.add("hidden");
   $("#app").classList.remove("hidden");
@@ -388,7 +484,20 @@ async function startApp(store, user) {
   $("#sidebar-user").textContent = (store.mode === "cloud" ? "☁ " : "▣ ") + who;
 
   bindNav();
+  updateAppbar();
   renderView();
+}
+
+// Felső léc: profilnév + avatar + szem-ikon
+function updateAppbar() {
+  const name = state.cache.profile?.name || state.user?.user_metadata?.name || (state.store?.mode === "cloud" ? (state.user?.email || "") : "Vendég");
+  const initial = ((name || "?").trim()[0] || "?").toUpperCase();
+  const pn = $("#appbar-pname"), av = $("#appbar-avatar");
+  if (pn) pn.textContent = name;
+  if (av) av.textContent = initial;
+  const hb = $("#btn-hide");
+  if (hb) hb.innerHTML = `<i data-lucide="${state.hideAmounts ? "eye-off" : "eye"}"></i>`;
+  drawIcons();
 }
 
 // ============ NAVIGÁCIÓ ============
@@ -401,6 +510,15 @@ function bindNav() {
   $("#month-label").onclick = () => { state.month = new Date(); renderView(); };
   $("#modal-close").onclick = closeModal;
   $("#modal-overlay").onclick = (e) => { if (e.target === $("#modal-overlay")) closeModal(); };
+  // Felső léc gombjai
+  $("#btn-settings").onclick = () => switchView("profile");
+  $("#appbar-profile").onclick = () => switchView("profile");
+  $("#btn-hide").onclick = () => {
+    state.hideAmounts = !state.hideAmounts;
+    setSetting("hide", state.hideAmounts);
+    updateAppbar();
+    renderView();
+  };
 }
 
 function switchView(view) {
@@ -421,7 +539,9 @@ function renderView() {
     goals: renderGoals, stats: renderStats, profile: renderProfile,
   };
   renderers[state.view](el);
+  if (typeof updateAppbar === "function") updateAppbar();
   drawIcons();
+  requestAnimationFrame(() => { try { fitMoney(el); } catch (e) {} });
 }
 
 // ============ ÁTTEKINTÉS (Dashboard) ============
@@ -495,12 +615,6 @@ function renderDashboard(el) {
   const initial = (name.trim()[0] || "V").toUpperCase();
 
   el.innerHTML = `
-    <div class="greet">
-      <div class="greet-avatar">${esc(initial)}</div>
-      <div class="greet-text"><div class="greet-hi">Üdv újra,</div><div class="greet-name">${esc(name)}</div></div>
-      <button class="icon-btn-round" data-goto="profile" aria-label="Profil">${ic("settings")}</button>
-    </div>
-
     <div class="hero">
       <div class="hero-label">${ic("wallet")} Hó végén marad</div>
       <div class="hero-balance">${fmtHTML(balance)}</div>
@@ -650,7 +764,7 @@ function renderBudget(el) {
   const catRows = state.cache.categories.map(c => `
     <div class="list-edit-row" data-catid="${c.id}">
       <span class="lab"><span class="mini-ico" style="background:${c.color}22;color:${c.color}">${ic(c.icon)}</span><span class="lab-txt"><div>${esc(c.name)}</div></span></span>
-      <input class="inline-amount" type="text" inputmode="numeric" value="${c.budget || ""}" placeholder="0" data-budget="${c.id}">
+      <input class="inline-amount" type="text" inputmode="numeric" value="${c.budget ? baseToDisplay(c.budget) : ""}" placeholder="0" data-budget="${c.id}">
       <button class="icon-btn" data-delcat="${c.id}" title="Törlés">${ic("trash-2")}</button>
     </div>`).join("");
 
@@ -659,10 +773,12 @@ function renderBudget(el) {
     const rico = r.type === "income" ? "arrow-down-left" : (cat?.icon || "package");
     const rcolor = r.type === "income" ? "var(--green)" : (cat?.color || "var(--text-muted)");
     const rtint = r.type === "income" ? "var(--green-soft)" : (cat?.color ? cat.color + "22" : "var(--surface-2)");
-    return `<div class="list-edit-row">
+    const paused = r.active === false;
+    return `<div class="list-edit-row ${paused ? "paused" : ""}">
       <span class="lab"><span class="mini-ico" style="background:${rtint};color:${rcolor}">${ic(rico)}</span>
-        <span class="lab-txt"><div>${esc(r.name)}</div><small style="color:var(--text-muted);font-weight:400">${freqText(r)} · ${r.type === "income" ? "bevétel" : "kiadás"}${r.active === false ? " · szünetel" : ""}</small></span></span>
+        <span class="lab-txt"><div>${esc(r.name)}</div><small style="color:var(--text-muted);font-weight:400">${freqText(r)} · ${r.type === "income" ? "bevétel" : "kiadás"}${paused ? " · szünetel" : ""}</small></span></span>
       <b style="font-size:14px;white-space:nowrap">${fmt(r.amount)}</b>
+      <button class="icon-btn neutral" data-pauserec="${r.id}" data-on="${paused ? "0" : "1"}" title="${paused ? "Folytatás" : "Szüneteltetés"}">${ic(paused ? "play" : "pause")}</button>
       <button class="icon-btn" data-delrec="${r.id}" title="Törlés">${ic("trash-2")}</button>
     </div>`;
   }).join("");
@@ -690,7 +806,7 @@ function renderBudget(el) {
 
   $("#btn-save-budgets").onclick = async () => {
     for (const input of el.querySelectorAll("[data-budget]")) {
-      const val = input.value.trim() === "" ? 0 : parseAmount(input.value);
+      const val = input.value.trim() === "" ? 0 : parseAmountToBase(input.value);
       if (isNaN(val)) continue;
       const cat = catById(input.dataset.budget);
       if (cat && Number(cat.budget || 0) !== val) await state.store.update("categories", cat.id, { budget: val });
@@ -700,6 +816,11 @@ function renderBudget(el) {
     toast("Költségkeretek mentve", "check");
   };
   $("#btn-add-cat").onclick = () => openCategoryModal();
+  el.querySelectorAll("[data-pauserec]").forEach(b => b.onclick = async () => {
+    const on = b.dataset.on === "1";
+    await state.store.update("recurring", b.dataset.pauserec, { active: !on });
+    await refreshCache(); renderView(); toast(on ? "Ismétlődés szüneteltetve" : "Ismétlődés folytatva", "check");
+  });
   el.querySelectorAll("[data-delcat]").forEach(b => b.onclick = async () => {
     if (!confirm("Biztosan törlöd a kategóriát? A tételei 'Egyéb' nélkül maradnak.")) return;
     await state.store.remove("categories", b.dataset.delcat);
@@ -1046,9 +1167,10 @@ function renderProfile(el) {
         <div class="setting-ico">${ic("circle-dollar-sign")}</div>
         <div class="grow"><div class="t">Megjelenített valuta</div><div class="s">Minden összeg ebben jelenik meg</div></div>
         <select id="cur-select" style="width:auto;padding:11px 13px;border:1.5px solid var(--border);border-radius:12px;background:var(--surface-2);font-weight:600">
-          ${Object.entries(CURRENCIES).map(([k, c]) => `<option value="${k}" ${k === curCode ? "selected" : ""}>${c.label}</option>`).join("")}
+          ${Object.entries(CURRENCIES).map(([k, c]) => `<option value="${k}" ${k === curCode ? "selected" : ""}>${esc(c.label)}</option>`).join("")}
         </select>
       </div>
+      <p class="field-hint" style="margin-top:10px">Fő (tárolási) pénznem: <b>${esc(CURRENCIES[baseCurrency()].label)}</b>. A megjelenítés a mai árfolyamon vált, az eredeti összegek megmaradnak (visszaváltáskor pontosan visszajönnek).</p>
     </div>
 
     <div class="card">
@@ -1144,20 +1266,21 @@ function renderProfile(el) {
     const sel = e.target;
     if (from === to) return;
     sel.disabled = true;
+    // Veszteségmentes: csak a MEGJELENÍTÉST váltjuk, a tárolt (alap) összegek nem változnak.
+    setSetting("currency", to);
     try {
-      const factor = await fetchRate(from, to);
-      const human = factor >= 1 ? factor.toFixed(2) : factor.toPrecision(3);
-      if (!confirm(`Átváltod az összes összeget a mai árfolyamon?\n\n${CURRENCIES[from].label} → ${CURRENCIES[to].label}\n1 ${CURRENCIES[from].symbol} = ${human} ${CURRENCIES[to].symbol}`)) {
-        sel.value = from; sel.disabled = false; return;
+      await ensureRates();
+      if (to !== baseCurrency() && displayFactor() == null) {
+        // nincs árfolyam (offline) – visszaállás, hogy ne legyen téves megjelenítés
+        setSetting("currency", from); sel.value = from;
+        toast("Árfolyam lekérése sikertelen – ellenőrizd az internetet");
+      } else {
+        renderView();
+        toast(to === baseCurrency() ? "Megjelenítés: fő pénznem" : "Megjelenítés átváltva a mai árfolyamon", "check");
       }
-      await state.store.convertAll(factor);
-      setSetting("currency", to);
-      await refreshCache();
-      renderView();
-      toast("Összegek átváltva a mai árfolyamon", "check");
     } catch (err) {
-      sel.value = from;
-      toast("Árfolyam lekérése sikertelen – ellenőrizd az internetet");
+      setSetting("currency", from); sel.value = from;
+      toast("Árfolyam lekérése sikertelen");
     } finally {
       sel.disabled = false;
     }
@@ -1258,7 +1381,7 @@ function openTxModal(tx = null, preset = {}) {
     </div>
     <div class="field">
       <div class="amount-wrap">
-        <input type="text" id="tx-amount" inputmode="decimal" placeholder="0" value="${tx ? tx.amount : ""}" autocomplete="off">
+        <input type="text" id="tx-amount" inputmode="decimal" placeholder="0" value="${tx ? baseToDisplay(tx.amount) : ""}" autocomplete="off">
         <span class="amount-cur ${curMeta.position === "prefix" ? "prefix" : ""}">${curMeta.symbol}</span>
       </div>
       <div class="quick-amounts">
@@ -1366,7 +1489,7 @@ function openTxModal(tx = null, preset = {}) {
 
   // Mentés
   $("#tx-save").onclick = async () => {
-    const amount = parseAmount($("#tx-amount").value);
+    const amount = parseAmountToBase($("#tx-amount").value);
     if (isNaN(amount) || amount <= 0) { toast("Adj meg érvényes összeget!"); return; }
     const note = $("#tx-note").value.trim();
     const date = $("#tx-date").value || todayStr();
@@ -1460,10 +1583,10 @@ function openGoalModal(goal = null) {
         ${icons.map(i => `<button type="button" class="cat-pick icononly ${sel === i ? "active" : ""}" data-icon="${i}">${ic(i)}</button>`).join("")}
       </div></div>
     <div class="field"><label>Célösszeg</label>
-      <input type="text" id="goal-target" inputmode="decimal" placeholder="Pl. 300k" value="${goal?.target_amount || ""}">
+      <input type="text" id="goal-target" inputmode="decimal" placeholder="Pl. 300k" value="${goal ? baseToDisplay(goal.target_amount) : ""}">
       <p class="field-hint">Tipp: „300k" = 300 000</p></div>
     <div class="field"><label>Már megvan ennyi (kezdőösszeg)</label>
-      <input type="text" id="goal-start" inputmode="decimal" placeholder="0" value="${goal?.start_amount || ""}"></div>
+      <input type="text" id="goal-start" inputmode="decimal" placeholder="0" value="${goal && goal.start_amount ? baseToDisplay(goal.start_amount) : ""}"></div>
     <div class="field"><label>Határidő (nem kötelező)</label>
       <input type="date" id="goal-deadline" value="${goal?.deadline ? goal.deadline.slice(0, 10) : ""}"></div>
     ${(!isEdit && canShare) ? `<div class="field"><label class="check-row"><input type="checkbox" id="goal-shared"> ${ic("users")} Közös cél (a társaddal együtt gyűjtötök rá)</label></div>` : ""}
@@ -1480,8 +1603,8 @@ function openGoalModal(goal = null) {
   });
 
   function recalc() {
-    const target = parseAmount($("#goal-target").value);
-    const start = parseAmount($("#goal-start").value) || 0;
+    const target = parseAmountToBase($("#goal-target").value);
+    const start = parseAmountToBase($("#goal-start").value) || 0;
     const dl = $("#goal-deadline").value;
     const box = $("#goal-calc");
     if (!isNaN(target) && target > 0 && dl) {
@@ -1499,11 +1622,11 @@ function openGoalModal(goal = null) {
 
   $("#goal-save").onclick = async () => {
     const name = $("#goal-name").value.trim();
-    const target = parseAmount($("#goal-target").value);
+    const target = parseAmountToBase($("#goal-target").value);
     if (!name || isNaN(target) || target <= 0) { toast("Add meg a cél nevét és összegét!"); return; }
     const row = {
       name, icon, target_amount: target,
-      start_amount: parseAmount($("#goal-start").value) || 0,
+      start_amount: parseAmountToBase($("#goal-start").value) || 0,
       deadline: $("#goal-deadline").value || null,
     };
     const shared = !isEdit && canShare && $("#goal-shared")?.checked;
@@ -1539,7 +1662,7 @@ function openCategoryModal() {
     if (!name) { toast("Adj nevet a kategóriának!"); return; }
     await state.store.insert("categories", {
       name, icon, color: colors[state.cache.categories.length % colors.length],
-      budget: parseAmount($("#cat-budget").value) || 0, sort: state.cache.categories.length,
+      budget: parseAmountToBase($("#cat-budget").value) || 0, sort: state.cache.categories.length,
     });
     await refreshCache(); closeModal(); renderView(); toast("Kategória létrehozva", "check");
   };
@@ -1581,7 +1704,7 @@ function openRecurringModal() {
   });
   $("#rec-save").onclick = async () => {
     const name = $("#rec-name").value.trim();
-    const amount = parseAmount($("#rec-amount").value);
+    const amount = parseAmountToBase($("#rec-amount").value);
     const count = Math.max(1, parseInt($("#rec-count").value, 10) || 1);
     const unit = $("#rec-unit").value || "month";
     const anchor = $("#rec-anchor").value || todayStr();
