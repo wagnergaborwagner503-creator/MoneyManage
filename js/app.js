@@ -181,7 +181,7 @@ window.addEventListener("resize", () => { try { fitMoney(); } catch (e) {} });
 function themeColors() {
   const cs = getComputedStyle(document.documentElement);
   const v = (n) => cs.getPropertyValue(n).trim();
-  return { text: v("--text"), muted: v("--text-muted"), grid: v("--border"), primary: v("--primary"), green: v("--green"), surface: v("--surface") };
+  return { text: v("--text"), muted: v("--text-muted"), grid: v("--border"), primary: v("--primary"), green: v("--green"), teal: v("--teal"), surface: v("--surface") };
 }
 const EMOJI_TO_ICON = {
   "🏠": "house", "🛒": "shopping-cart", "🚌": "bus", "🎉": "party-popper", "💊": "pill",
@@ -229,6 +229,8 @@ const today0 = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; }
 const isoDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const isFutureDate = (str) => new Date(str + "T00:00:00") > today0();
 const isPending = (t) => t.pending === true || t.pending === "true";
+// Megtakarítás-felhasználás: bevétel típusú, de cél megvalósításából (külön kezeljük)
+const isWithdraw = (t) => t.type === "income" && (t.from_savings === true || t.from_savings === "true");
 // "realized" = teljesített tételek (ezek számítanak a statisztikába); a pending kimarad
 const realized = (list) => list.filter(t => !isPending(t));
 const realizedOfMonth = (d = state.month) => realized(txOfMonth(d));
@@ -664,18 +666,20 @@ function renderDashboard(el) {
   const txAll = txOfMonth();
   const txReal = realized(txAll);
   // Teljesített (realized) – ez megy a Bevétel/Kiadás kártyákra és a keretekbe
-  const incomeR = sumBy(txReal, "income");
+  const incomePureR = txReal.filter(t => t.type === "income" && !isWithdraw(t)).reduce((s, t) => s + Number(t.amount), 0);
+  const withdrawR = txReal.filter(isWithdraw).reduce((s, t) => s + Number(t.amount), 0); // felhasznált megtakarítás
   const expenseR = sumBy(txReal, "expense");
   const savingR = sumBy(txReal, "saving");
   // Tervezettel együtt (pending is) – ez a "Hó végén marad"
-  const incomeAll = sumBy(txAll, "income");
+  const incomeAll = sumBy(txAll, "income"); // tartalmazza a felhasznált megtakarítást is (mindkettő elérhető pénz)
+  const incomePureAll = txAll.filter(t => t.type === "income" && !isWithdraw(t)).reduce((s, t) => s + Number(t.amount), 0);
   const expenseAll = sumBy(txAll, "expense");
   const savingAll = sumBy(txAll, "saving");
   const carry = carryoverInto();   // előző hónapból átvitt maradék
   const balance = carry + incomeAll - expenseAll - savingAll;
   const pendingCount = txAll.filter(isPending).length;
   const plannedExpense = expenseAll - expenseR;
-  const plannedIncome = incomeAll - incomeR;
+  const plannedIncome = incomePureAll - incomePureR;
   const plannedSaving = savingAll - savingR;
 
   const now = new Date();
@@ -749,8 +753,9 @@ function renderDashboard(el) {
     <div class="stat-grid">
       <div class="stat-card">
         <div class="stat-head"><span class="pill-ico green">${ic("trending-up")}</span> Bevétel</div>
-        <div class="stat-value pos">${fmtHTML(incomeR)}</div>
+        <div class="stat-value pos">${fmtHTML(incomePureR)}</div>
         ${plannedIncome ? `<div class="stat-sub">+ ${fmt(plannedIncome)} tervezett</div>` : ""}
+        ${withdrawR ? `<div class="stat-sub" style="color:var(--teal)">+ ${fmt(withdrawR)} felhasznált megtakarítás</div>` : ""}
       </div>
       <div class="stat-card">
         <div class="stat-head"><span class="pill-ico red">${ic("trending-down")}</span> Kiadás</div>
@@ -760,7 +765,7 @@ function renderDashboard(el) {
       <div class="stat-card span2">
         <div class="stat-head"><span class="pill-ico blue">${ic("piggy-bank")}</span> Megtakarítás / félretett</div>
         <div class="stat-value blue">${fmtHTML(savingR)}</div>
-        <div class="stat-sub">${plannedSaving ? `+ ${fmt(plannedSaving)} tervezett · ` : ""}nem számít a kiadásokba</div>
+        <div class="stat-sub">${plannedSaving ? `+ ${fmt(plannedSaving)} tervezett · ` : ""}${withdrawR ? `ebből felhasználva: ${fmt(withdrawR)} · ` : ""}nem számít a kiadásokba</div>
       </div>
     </div>
 
@@ -793,11 +798,14 @@ function txItemHtml(t) {
   const cat = catById(t.category_id);
   const goal = t.goal_id ? goalById(t.goal_id) : null;
   const pending = isPending(t);
+  const withdraw = isWithdraw(t);
   let iconN, color, tint;
-  if (t.type === "income") { iconN = "arrow-down-left"; color = "var(--green)"; tint = "var(--green-soft)"; }
+  if (withdraw) { iconN = "piggy-bank"; color = "var(--teal)"; tint = "var(--surface-2)"; }
+  else if (t.type === "income") { iconN = "arrow-down-left"; color = "var(--green)"; tint = "var(--green-soft)"; }
   else if (t.type === "saving") { iconN = goal?.icon || "piggy-bank"; color = "var(--primary)"; tint = "var(--primary-soft)"; }
   else { iconN = cat?.icon || "package"; color = cat?.color || "var(--text-muted)"; tint = cat?.color ? cat.color + "22" : "var(--surface-2)"; }
-  const sub = t.type === "income" ? "Bevétel"
+  const sub = withdraw ? "Felhasznált megtakarítás"
+    : t.type === "income" ? "Bevétel"
     : t.type === "saving" ? `Megtakarítás${goal ? " → " + esc(goal.name) : ""}`
     : esc(cat?.name || "Egyéb");
   const amtHtml = t.type === "income" ? fmtHTML(t.amount, { plus: true }) : fmtHTML(-Math.abs(Number(t.amount)));
@@ -975,12 +983,14 @@ function goalCardHtml(g) {
     const parts = Object.entries(byUser).map(([n, a]) => `${esc(n)}: <b>${fmt(a)}</b>`).join(" · ");
     if (parts) contribHtml = `<div class="goal-monthly" style="background:var(--surface-2);color:var(--text-muted)">${ic("users")}<div>${parts}</div></div>`;
   }
-  const badge = isShared ? `<span class="tx-badge" style="color:var(--primary);border-color:var(--primary)">${ic("users")} közös</span>` : "";
-  return `<div class="goal-card">
+  const done = !!g.done;
+  const sharedBadge = isShared ? `<span class="tx-badge" style="color:var(--primary);border-color:var(--primary)">${ic("users")} közös</span>` : "";
+  const doneBadge = done ? `<span class="tx-badge" style="color:var(--green);border-color:var(--green)">${ic("check")} megvalósítva</span>` : "";
+  return `<div class="goal-card ${done ? "done" : ""}">
     <div class="goal-head">
       <div class="goal-ico">${ic(g.icon || "target")}</div>
-      <div style="flex:1;min-width:0"><div class="goal-name">${esc(g.name)} ${badge}</div><div class="goal-deadline">${dlText}</div></div>
-      ${isShared ? "" : `<button class="icon-btn edit" data-editgoal="${g.id}" title="Szerkesztés">${ic("pencil")}</button>`}
+      <div style="flex:1;min-width:0"><div class="goal-name">${esc(g.name)} ${sharedBadge}${doneBadge}</div><div class="goal-deadline">${dlText}</div></div>
+      ${isShared || done ? "" : `<button class="icon-btn edit" data-editgoal="${g.id}" title="Szerkesztés">${ic("pencil")}</button>`}
       <button class="icon-btn" data-delgoal="${g.id}" title="Törlés">${ic("trash-2")}</button>
     </div>
     <div class="goal-amounts"><span>Összegyűjtve: <b>${fmt(saved)}</b></span><span>Cél: <b>${fmt(g.target_amount)}</b></span></div>
@@ -988,9 +998,12 @@ function goalCardHtml(g) {
     <div class="goal-amounts"><span>${Math.round(pct)}%</span><span>Még hiányzik: ${fmt(remaining)}</span></div>
     ${monthlyHtml}
     ${contribHtml}
-    <div class="goal-actions">
-      <button class="btn btn-ghost btn-sm" data-deposit="${g.id}" style="flex:1">${ic("piggy-bank")} Félreteszek rá</button>
-    </div>
+    ${done
+      ? `<div class="goal-monthly done" style="margin-top:13px">${ic("circle-check")}<div>Megvalósítva – az összegyűjtött <b>${fmt(saved)}</b> a bevételekhez került.</div></div>`
+      : `<div class="goal-actions">
+          <button class="btn btn-ghost btn-sm" data-deposit="${g.id}" style="flex:1">${ic("piggy-bank")} Félreteszek rá</button>
+          ${saved > 0 ? `<button class="btn btn-primary btn-sm" data-realize="${g.id}" style="flex:1">${ic("circle-check")} Megvalósítás</button>` : ""}
+        </div>`}
   </div>`;
 }
 
@@ -1039,6 +1052,23 @@ function renderGoals(el) {
   });
   el.querySelectorAll("[data-deposit]").forEach(b => b.onclick = () => {
     openTxModal(null, { type: "saving", goal_id: b.dataset.deposit });
+  });
+  el.querySelectorAll("[data-realize]").forEach(b => b.onclick = async () => {
+    const g = goalById(b.dataset.realize); if (!g) return;
+    const amount = goalSaved(g);
+    if (amount <= 0) { toast("Még nincs összegyűjtött összeg"); return; }
+    if (!confirm(`Megvalósítod a(z) "${g.name}" célt?\n\nAz összegyűjtött ${fmt(amount, { force: true })} felhasznált megtakarításként jelenik meg (kiegészítésként, nem sima bevételként), és a cél lezárul.`)) return;
+    // "Megtakarítás felhasználás" könyvelése (from_savings) a megfelelő számlára, majd a cél lezárása
+    const prev = state.store.ctxHousehold;
+    if (g.household_id && state.store.setCtx) state.store.setCtx(g.household_id);
+    try {
+      await state.store.insert("transactions", { type: "income", from_savings: true, amount, note: g.name + " (megtakarítás felhasználva)", date: todayStr(), pending: false });
+    } finally {
+      if (g.household_id && state.store.setCtx) state.store.setCtx(prev || null);
+    }
+    await state.store.update("goals", g.id, { done: true });
+    await refreshCache(); renderView();
+    toast("Cél megvalósítva – felhasznált megtakarításként könyvelve", "check");
   });
 }
 
@@ -1174,18 +1204,22 @@ function renderStats(el) {
   // --- 6 havi oszlopdiagram (Chart.js, témázott) ---
   const months = [];
   for (let i = 5; i >= 0; i--) months.push(new Date(state.month.getFullYear(), state.month.getMonth() - i, 1));
-  const incomeData = months.map(m => sumBy(realizedOfMonth(m), "income"));
+  const incomeData = months.map(m => realizedOfMonth(m).filter(t => t.type === "income" && !isWithdraw(t)).reduce((s, t) => s + Number(t.amount), 0));
+  const withdrawData = months.map(m => realizedOfMonth(m).filter(isWithdraw).reduce((s, t) => s + Number(t.amount), 0));
   const expenseData = months.map(m => sumBy(realizedOfMonth(m), "expense"));
+  const hasWithdraw = withdrawData.some(v => v > 0);
+  const barSets = [
+    { label: "Bevétel", data: incomeData, backgroundColor: C.green, stack: "in", borderRadius: 6, maxBarThickness: 30 },
+  ];
+  if (hasWithdraw) barSets.push({ label: "Felhasznált megtakarítás", data: withdrawData, backgroundColor: C.teal, stack: "in", borderRadius: 6, maxBarThickness: 30 });
+  barSets.push({ label: "Kiadás", data: expenseData, backgroundColor: C.primary, stack: "out", borderRadius: 6, maxBarThickness: 30 });
   state.charts.bar = new Chart($("#chart-bar"), {
     type: "bar",
-    data: { labels: months.map(m => MONTHS_HU[m.getMonth()].slice(0, 3)), datasets: [
-      { label: "Bevétel", data: incomeData, backgroundColor: C.green, borderRadius: 7, maxBarThickness: 26 },
-      { label: "Kiadás", data: expenseData, backgroundColor: C.primary, borderRadius: 7, maxBarThickness: 26 },
-    ]},
+    data: { labels: months.map(m => MONTHS_HU[m.getMonth()].slice(0, 3)), datasets: barSets },
     options: { responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { position: "bottom", labels: { boxWidth: 12, color: C.muted, font: { family: "Inter", size: 12 } } },
+      plugins: { legend: { position: "bottom", labels: { boxWidth: 12, color: C.muted, font: { family: "Inter", size: 11 } } },
         tooltip: { callbacks: { label: (c) => ` ${c.dataset.label}: ${fmt(c.parsed.y)}` } } },
-      scales: { x: { grid: { display: false }, ticks: { color: C.muted } }, y: { grid: { color: C.grid }, ticks: { color: C.muted, callback: (v) => (v / 1000) + "k" } } } },
+      scales: { x: { stacked: true, grid: { display: false }, ticks: { color: C.muted } }, y: { stacked: true, grid: { color: C.grid }, ticks: { color: C.muted, callback: (v) => (v / 1000) + "k" } } } },
   });
 
   // --- Kategóriák havi összehasonlítása (stacked) ---

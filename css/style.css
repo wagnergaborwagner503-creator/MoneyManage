@@ -26,6 +26,7 @@
   --red-soft: #fdeceb;
   --amber: #d97706;
   --amber-soft: #fef5e7;
+  --teal: #0d9488;
 
   --hero-grad: radial-gradient(120% 140% at 85% 0%, #4f8bff 0%, #2563eb 42%, #1736b0 100%);
   --hero-text: #ffffff;
@@ -63,6 +64,7 @@
   --red-soft: rgba(251,111,111,.14);
   --amber: #fbbf24;
   --amber-soft: rgba(251,191,36,.14);
+  --teal: #2dd4bf;
 
   --hero-grad: radial-gradient(130% 150% at 80% -10%, #4f8bff 0%, #2563eb 45%, #15246e 100%);
   --hero-text: #ffffff;
@@ -364,6 +366,7 @@ input, select, textarea { font-family: inherit; font-size: 16px; color: var(--te
 
 /* ============ Goals ============ */
 .goal-card { background: var(--surface); border-radius: 20px; padding: 18px; box-shadow: var(--shadow-sm); border: 1px solid var(--border); margin-bottom: 14px; }
+.goal-card.done { opacity: .72; }
 .goal-head { display: flex; align-items: center; gap: 13px; margin-bottom: 13px; }
 .goal-ico { width: 48px; height: 48px; border-radius: 15px; background: var(--primary-soft); color: var(--primary); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .goal-ico .lucide { width: 24px; height: 24px; }

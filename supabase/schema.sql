@@ -57,6 +57,7 @@ create table if not exists public.transactions (
   date         date not null default current_date,
   recurring_id uuid,
   pending      boolean default false,   -- true = jövőbeli/tervezett tétel (statisztikába még nem, hó végi egyenlegbe igen)
+  from_savings boolean default false,   -- true = cél megvalósításakor a megtakarításból felhasznált összeg (income, de külön kezelve)
   created_at   timestamptz default now()
 );
 
@@ -94,6 +95,7 @@ create table if not exists public.recurring (
 -- ---------- Meglévő adatbázis frissítése (ha már korábban lefuttattad a sémát) ----------
 -- Ezek hozzáadják az új oszlopokat, ha még hiányoznak. Hibamentes, ha már léteznek.
 alter table public.transactions add column if not exists pending boolean default false;
+alter table public.transactions add column if not exists from_savings boolean default false;
 alter table public.recurring    add column if not exists interval_unit  text    default 'month';
 alter table public.recurring    add column if not exists interval_count integer default 1;
 alter table public.recurring    add column if not exists anchor_date    date;
