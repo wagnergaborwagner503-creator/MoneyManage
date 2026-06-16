@@ -103,9 +103,31 @@ begin
   delete from public.household_members where household_id = p_hid and user_id = auth.uid();
 end; $$;
 
+-- Új ZSEB (külön számla) létrehozása: egytagú háztartás, megadott névvel
+create or replace function public.mm_create_pocket(p_name text)
+returns uuid language plpgsql security definer set search_path = public as $$
+declare hid uuid;
+begin
+  insert into public.households(name, created_by)
+    values (coalesce(nullif(trim(p_name), ''), 'Zseb'), auth.uid()) returning id into hid;
+  insert into public.household_members(household_id, user_id, display_name)
+    values (hid, auth.uid(), coalesce((select name from public.profiles where id = auth.uid()), ''));
+  return hid;
+end; $$;
+
+-- Háztartás/zseb átnevezése (csak tag teheti)
+create or replace function public.mm_rename(p_hid uuid, p_name text)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_household_member(p_hid) then raise exception 'NOT_MEMBER'; end if;
+  update public.households set name = coalesce(nullif(trim(p_name), ''), name) where id = p_hid;
+end; $$;
+
 grant execute on function public.mm_create_invite() to authenticated;
 grant execute on function public.mm_join(text) to authenticated;
 grant execute on function public.mm_leave(uuid) to authenticated;
+grant execute on function public.mm_create_pocket(text) to authenticated;
+grant execute on function public.mm_rename(uuid, text) to authenticated;
 grant execute on function public.is_household_member(uuid) to authenticated;
 
 -- ==========================================================================

@@ -162,6 +162,26 @@ class SupaStore {
     const { data: members } = await this.sb.from("household_members").select("*").eq("household_id", h.id);
     return { ...h, members: members || [] };
   }
+  // Az ÖSSZES háztartás/zseb, amelynek a felhasználó tagja (a tagokkal együtt)
+  async getHouseholds() {
+    const { data: hs, error } = await this.sb.from("households").select("*").order("created_at", { ascending: true });
+    if (error || !hs) return [];
+    const out = [];
+    for (const h of hs) {
+      const { data: members } = await this.sb.from("household_members").select("*").eq("household_id", h.id);
+      out.push({ ...h, members: members || [] });
+    }
+    return out;
+  }
+  async createPocket(name) {
+    const { data, error } = await this.sb.rpc("mm_create_pocket", { p_name: name });
+    if (error) throw error;
+    return data;
+  }
+  async renamePocket(hid, name) {
+    const { error } = await this.sb.rpc("mm_rename", { p_hid: hid, p_name: name });
+    if (error) throw error;
+  }
   async createInvite() {
     const { data, error } = await this.sb.rpc("mm_create_invite");
     if (error) throw error;

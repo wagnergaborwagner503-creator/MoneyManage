@@ -12,8 +12,9 @@ const state = {
   user: null,
   month: new Date(),   // kiválasztott hónap
   view: "dashboard",
-  household: null,     // közös fiók (ha össze van csatolva), felhő módban
-  account: "self",     // melyik számlát kezeljük: "self" (saját) | "shared" (közös)
+  household: null,     // az AKTUÁLIS számla háztartás-objektuma (ha nem saját)
+  households: [],      // az összes számla (zseb/közös háztartás)
+  account: "self",     // melyik számlát kezeljük: "self" (saját) | <household id>
   cache: { categories: [], transactions: [], goals: [], recurring: [], profile: {}, sharedGoals: [], sharedTx: [], contributions: [] },
   charts: {},
   deferredInstall: null,
@@ -272,19 +273,29 @@ function freqText(r) {
 function catById(id) { return state.cache.categories.find(c => c.id === id); }
 const allGoals = () => [...state.cache.goals, ...(state.cache.sharedGoals || [])];
 function goalById(id) { return allGoals().find(g => g.id === id); }
+// Az aktuális számlán (saját vagy zseb/közös) az adott célra félretett megtakarítások összege.
 function goalSaved(goal) {
-  if (goal.household_id) {
-    // Közös cél: minden tag hozzájárulása összeadódik (shared_contributions)
-    return Number(goal.start_amount || 0) +
-      (state.cache.contributions || []).filter(c => c.goal_id === goal.id).reduce((s, c) => s + Number(c.amount || 0), 0);
-  }
   return Number(goal.start_amount || 0) +
     state.cache.transactions.filter(t => t.type === "saving" && t.goal_id === goal.id)
       .reduce((s, t) => s + Number(t.amount || 0), 0);
 }
 
+// ---------- Egyenleg-korrekció (kezdő egyenleg) – számlánként, eszközszinten ----------
+const acctKey = () => (state.account && state.account !== "self" ? state.account : "self");
+function getOpening() { const o = getSettings().openings; const v = o && o[acctKey()]; return v ? v : null; }
+// A jelenleg vezetett nettó egy adott dátumig (korrekció nélkül) – a korrekció kiszámításához
+function trackedNetUpTo(dateStr) {
+  let sum = 0;
+  for (const t of state.cache.transactions) {
+    if ((t.date || "") > dateStr) continue;
+    const a = Number(t.amount) || 0;
+    if (t.type === "income") sum += a; else sum -= a;
+  }
+  return sum;
+}
+
 // ---------- Előző hónapból átvitt maradék ----------
-// A hónap kezdete ELŐTTI összes tétel nettója (bevétel − kiadás − megtakarítás).
+// A hónap kezdete ELŐTTI összes tétel nettója (bevétel − kiadás − megtakarítás) + a kezdő-egyenleg korrekció.
 function carryoverInto(d = state.month) {
   const start = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
   let sum = 0;
@@ -293,6 +304,8 @@ function carryoverInto(d = state.month) {
     const a = Number(t.amount) || 0;
     if (t.type === "income") sum += a; else sum -= a; // kiadás és megtakarítás is csökkenti a maradékot
   }
+  const op = getOpening();
+  if (op) sum += Number(op.amount) || 0; // a korrekció állandó alapszint
   return sum;
 }
 
@@ -364,15 +377,18 @@ function projectedCumulative(d = state.month) {
 }
 
 async function refreshCache() {
-  // 1) Közös fiók lekérése (cloud) – előbb, hogy beállíthassuk a kontextust
-  let household = null;
+  // 1) Az összes számla (zseb/közös háztartás) lekérése (cloud) – hogy beállíthassuk a kontextust
+  let households = [];
   if (state.store.mode === "cloud") {
-    try { household = await state.store.getHousehold(); } catch (e) { /* sharing nincs beállítva */ }
+    try { households = await state.store.getHouseholds(); } catch (e) { /* sharing nincs beállítva */ }
   }
-  state.household = household;
-  if (state.account === "shared" && !household) state.account = "self"; // nincs közös fiók → saját
-  // a tároló kontextusa: közös nézetben a household tételeit kezeljük
-  state.store.setCtx(state.account === "shared" && household ? household.id : null);
+  state.households = households;
+  // ha a kiválasztott számla már nem létezik, vissza a sajátra
+  if (state.account !== "self" && !households.some(h => h.id === state.account)) state.account = "self";
+  const curHid = state.account !== "self" ? state.account : null;
+  state.household = curHid ? households.find(h => h.id === curHid) : null;
+  // a tároló kontextusa: zseb/közös nézetben az adott háztartás tételeit kezeljük
+  state.store.setCtx(curHid);
 
   const [categories, transactions, goals, recurring, profile] = await Promise.all([
     state.store.list("categories"),
@@ -383,21 +399,7 @@ async function refreshCache() {
   ]);
   categories.sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0));
   transactions.sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.created_at || "").localeCompare(a.created_at || ""));
-
-  // Közös kassza adatai: a SAJÁT nézet aljára (összefoglaló), és a közös cél hozzájárulások a goalSaved-hez
-  let sharedGoals = [], sharedTx = [], contributions = [];
-  if (household) {
-    try {
-      const hid = household.id;
-      [sharedGoals, sharedTx, contributions] = await Promise.all([
-        state.store.listShared("goals", hid),
-        state.store.listShared("transactions", hid),
-        state.store.listContributions(hid),
-      ]);
-      sharedTx.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
-    } catch (e) { /* kihagyjuk */ }
-  }
-  state.cache = { categories, transactions, goals, recurring, profile, sharedGoals, sharedTx, contributions };
+  state.cache = { categories, transactions, goals, recurring, profile, sharedGoals: [], sharedTx: [], contributions: [] };
 }
 
 // ---------- Ismétlődő tételek automatikus könyvelése ----------
@@ -579,6 +581,7 @@ async function startApp(store, user) {
   bindNav();
   updateAppbar();
   renderView();
+  maybeShowWelcome();
 }
 
 // Felső léc: profilnév + avatar + szem-ikon
@@ -594,17 +597,43 @@ function updateAppbar() {
   drawIcons();
 }
 
-// Saját / Közös számla-váltó (csak ha van összecsatolt közös fiók)
+// Számla-váltó legördülő (Saját + zsebek/közös háztartások + Új zseb) – csak felhő módban
 function updateAcctSwitch() {
-  const sw = $("#acct-switch");
-  if (!sw) return;
-  // Felhő módban mindig látszik (társ nélkül a "Közös" a Profil összecsatoláshoz visz)
-  if (state.store && state.store.mode === "cloud") {
-    sw.classList.remove("hidden");
-    sw.querySelectorAll("button").forEach(b => b.classList.toggle("active", b.dataset.acct === state.account));
-  } else {
-    sw.classList.add("hidden");
+  const wrap = $("#acct-wrap"); if (!wrap) return;
+  if (!(state.store && state.store.mode === "cloud")) { wrap.classList.add("hidden"); return; }
+  wrap.classList.remove("hidden");
+  const cur = state.account === "self" ? "Saját" : (state.households.find(h => h.id === state.account)?.name || "Számla");
+  $("#acct-label").textContent = cur;
+  const items = [`<button data-acct="self" class="${state.account === "self" ? "active" : ""}">${ic("user")} <span style="flex:1">Saját</span>${state.account === "self" ? ic("check") : ""}</button>`];
+  for (const h of state.households) {
+    const shared = (h.members || []).length > 1;
+    items.push(`<button data-acct="${h.id}" class="${state.account === h.id ? "active" : ""}">${ic(shared ? "users" : "wallet")} <span style="flex:1">${esc(h.name)}</span>${state.account === h.id ? ic("check") : ""}</button>`);
   }
+  items.push(`<div class="acct-sep"></div>`);
+  items.push(`<button class="acct-new" data-acct="__new">${ic("plus")} Új zseb létrehozása</button>`);
+  const menu = $("#acct-menu");
+  menu.innerHTML = items.join("");
+  menu.querySelectorAll("button").forEach(b => b.onclick = async () => {
+    menu.classList.add("hidden");
+    const a = b.dataset.acct;
+    if (a === "__new") return createPocketFlow();
+    if (a === state.account) return;
+    state.account = a;
+    await refreshCache();
+    if (state.view === "dashboard") renderView(); else switchView("dashboard");
+    toast(a === "self" ? "Saját számla" : (state.households.find(h => h.id === a)?.name || "Számla"), "check");
+  });
+}
+async function createPocketFlow() {
+  const name = (prompt("Új zseb neve (pl. Vállalkozás):", "") || "").trim();
+  if (!name) return;
+  try {
+    const hid = await state.store.createPocket(name);
+    state.account = hid;
+    await refreshCache();
+    if (state.view === "dashboard") renderView(); else switchView("dashboard");
+    toast("Zseb létrehozva", "check");
+  } catch (e) { toast("Nem sikerült létrehozni – futott már a sharing.sql?"); }
 }
 
 // ============ NAVIGÁCIÓ ============
@@ -626,16 +655,10 @@ function bindNav() {
     updateAppbar();
     renderView();
   };
-  // Saját / Közös számla váltása
-  $("#acct-switch").querySelectorAll("button").forEach(b => b.onclick = async () => {
-    const acct = b.dataset.acct;
-    if (acct === state.account) return;
-    if (acct === "shared" && !state.household) { switchView("profile"); toast("Előbb csatold össze a fiókod egy társsal a Profilban"); return; }
-    state.account = acct;
-    await refreshCache();
-    if (state.view === "dashboard") renderView(); else switchView("dashboard");
-    toast(acct === "shared" ? "Közös számla" : "Saját számla", "check");
-  });
+  // Számla-váltó legördülő nyitása/zárása (a menüpontokat az updateAcctSwitch köti)
+  const acctBtn = $("#acct-btn");
+  if (acctBtn) acctBtn.onclick = (e) => { e.stopPropagation(); $("#acct-menu").classList.toggle("hidden"); };
+  document.addEventListener("click", () => { const m = $("#acct-menu"); if (m) m.classList.add("hidden"); });
 }
 
 function switchView(view) {
@@ -1297,6 +1320,8 @@ function renderProfile(el) {
   const curCode = currentCurrency();
   const name = p.name || state.user?.user_metadata?.name || "";
   const initial = ((name || "V").trim()[0] || "V").toUpperCase();
+  const op = getOpening();
+  const acctName = state.account === "self" ? "Saját számla" : (state.household?.name || "Közös");
 
   el.innerHTML = `
     <div class="section-title">Profil</div>
@@ -1326,6 +1351,17 @@ function renderProfile(el) {
         </select></div>
         <p class="field-hint">Fő (tárolási) pénznem: <b>${esc(CURRENCIES[baseCurrency()].label)}</b>. Váltáskor csak a megjelenítés változik a mai árfolyamon – az eredeti összegek megmaradnak.</p>
       </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">${ic("scale")} Egyenleg-korrekció <span style="color:var(--text-muted);font-weight:600">${esc(acctName)}</span></div>
+      <p class="field-hint" style="margin-bottom:12px">Ha frissen kezdted vezetni a pénzügyeid, az app egyenlege eltérhet a banki egyenlegtől (a kiinduló összeg ismeretlen). Add meg egy dátumra a TÉNYLEGES egyenleget, és az app ahhoz igazodik. <b>Elég egyszer megtenni</b> – utána, ha mindent rögzítesz, pontos marad.</p>
+      ${op ? `<div class="banner info">${ic("info")}<div>Aktív korrekció: <b>${fmt(op.amount, { plus: true, force: true })}</b> · ${esc(op.date)}</div></div>` : ""}
+      <div class="field"><label>Dátum</label><input type="date" id="adj-date" value="${op?.date || todayStr()}"></div>
+      <div class="field"><label>Tényleges egyenleg ezen a napon</label>
+        <div class="input-wrap">${ic("circle-dollar-sign")}<input type="text" id="adj-amount" inputmode="decimal" placeholder="Pl. 250000"></div></div>
+      <button class="btn btn-primary btn-block" id="adj-save">Korrekció mentése</button>
+      ${op ? `<button class="btn btn-ghost btn-block" id="adj-clear" style="margin-top:8px">Korrekció törlése</button>` : ""}
     </div>
 
     <div class="card">
@@ -1378,6 +1414,25 @@ function renderProfile(el) {
   `;
 
   $("#seg-theme").querySelectorAll("button").forEach(b => b.onclick = () => { setSetting("theme", b.dataset.theme); applyTheme(); });
+
+  // ---- Egyenleg-korrekció ----
+  $("#adj-save").onclick = () => {
+    const d = $("#adj-date").value || todayStr();
+    const b = parseAmountToBase($("#adj-amount").value);
+    if (isNaN(b)) { toast("Adj meg érvényes egyenleget!"); return; }
+    const amount = Math.round((b - trackedNetUpTo(d)) * 100) / 100;
+    const o = getSettings().openings || {};
+    o[acctKey()] = { amount, date: d };
+    setSetting("openings", o);
+    renderView(); toast("Egyenleg-korrekció mentve", "check");
+  };
+  const adjClear = $("#adj-clear");
+  if (adjClear) adjClear.onclick = () => {
+    const o = getSettings().openings || {};
+    delete o[acctKey()];
+    setSetting("openings", o);
+    renderView(); toast("Korrekció törölve");
+  };
 
   // ---- Közös fiók ----
   const btnInvite = $("#btn-new-invite");
@@ -1514,6 +1569,25 @@ function openModal(title, bodyHtml) {
 }
 function closeModal() { $("#modal-overlay").classList.add("hidden"); }
 
+// Üdvözlő / funkció-összefoglaló (regisztráció vagy első indítás után, egyszer)
+function maybeShowWelcome() {
+  if (localStorage.getItem("mm_welcome_seen") === "1") return;
+  localStorage.setItem("mm_welcome_seen", "1");
+  const feat = (icon, title, desc) => `<div class="welcome-feat"><span class="welcome-ico">${ic(icon)}</span><div><div class="wf-t">${title}</div><div class="wf-d">${desc}</div></div></div>`;
+  openModal("Üdv a MoneyManage-ben! 👋", `
+    <p class="field-hint" style="margin:-6px 0 14px;font-size:13.5px">Tervezd meg a hónapod, kövesd a kiadásaid, és ne érjen meglepetés. Amit tud:</p>
+    ${feat("wallet", "Költségvetés & limitek", "Havi keretek kategóriánként, túlköltés-jelzéssel.")}
+    ${feat("chart-column", "Statisztikák", "Grafikonok, kategória-bontás, havi összehasonlítás, átlagok.")}
+    ${feat("calculator", "Okos előrejelzés", "Szokásaid és a rendszeres tételeid alapján megmondja, mennyi marad a hó végén.")}
+    ${feat("calendar-clock", "Jövőbeli & ismétlődő tételek", "Tervezz előre fizetésekkel, előfizetésekkel (akár 3 hetente).")}
+    ${feat("target", "Célok", "Gyűjts félre célokra, majd egy gombbal valósítsd meg.")}
+    ${feat("layers", "Külön számlák (zsebek)", "Saját, közös (pár/barát) és egyedi zsebek (pl. vállalkozás) – jobb fent válthatsz.")}
+    ${feat("eye-off", "Privát", "Egy gombbal elrejtheted az összegeket; az adatok csak a tieid.")}
+    <button class="btn btn-primary btn-block" id="welcome-close" style="margin-top:16px">Kezdjük!</button>
+  `);
+  $("#welcome-close").onclick = closeModal;
+}
+
 // ---------- Tranzakció modál (új / szerkesztés) ----------
 function openTxModal(tx = null, preset = {}) {
   const isEdit = !!tx;
@@ -1525,7 +1599,7 @@ function openTxModal(tx = null, preset = {}) {
   const noteSuggestions = [...new Set(state.cache.transactions.map(t => t.note).filter(Boolean))].slice(0, 30);
   const goalOptions = allGoals().map(g => `<option value="${g.id}" ${g.id === goalId ? "selected" : ""}>${esc(g.name)}${g.household_id ? " (közös)" : ""}</option>`).join("");
   const curMeta = CURRENCIES[currentCurrency()];
-  const canShare = state.store.mode === "cloud" && !!state.household;   // van összecsatolt közös fiók
+  const canShare = false; // a számlaváltó modell váltotta ki a "közös" pipát   // van összecsatolt közös fiók
   const myName = state.cache.profile?.name || state.user?.user_metadata?.name || "Társ";
 
   openModal(isEdit ? "Tétel szerkesztése" : "Új tétel", `
@@ -1657,10 +1731,10 @@ function openTxModal(tx = null, preset = {}) {
       category_id: type === "expense" ? categoryId : null,
       goal_id: type === "saving" ? ($("#tx-goal")?.value || null) : null,
     };
-    // Közös fiók: közös kiadás, ill. közös célba befizetés
-    const sharedOn = type === "expense" && state.household && $("#tx-shared")?.checked;
-    const goalObj = type === "saving" ? goalById(row.goal_id) : null;
-    const sharedGoal = goalObj && goalObj.household_id ? goalObj : null;
+    // A számlaváltó (Saját / zseb / közös) modellben a kontextus dönti el, hova kerül a tétel –
+    // nincs külön "közös" pipa, a normál mentés a megfelelő számlára ír (ctxHousehold).
+    const sharedOn = false;
+    const sharedGoal = null;
     try {
       if (isEdit) {
         if (recurOn && linkedRec) {
@@ -1729,7 +1803,7 @@ function openGoalModal(goal = null) {
   const isEdit = !!goal;
   const icons = ["target", "umbrella", "car", "house", "gem", "graduation-cap", "laptop", "shield", "plane", "music", "baby", "dog"];
   const sel = iconName(goal?.icon || "target");
-  const canShare = state.store.mode === "cloud" && !!state.household;
+  const canShare = false; // a számlaváltó modell váltotta ki a "közös" pipát
   openModal(isEdit ? "Cél szerkesztése" : "Új cél", `
     <div class="field"><label>Mi a célod?</label>
       <input type="text" id="goal-name" placeholder="Pl. nyaralás, autó, vésztartalék" value="${esc(goal?.name || "")}"></div>
@@ -1795,10 +1869,14 @@ function openGoalModal(goal = null) {
 
 // ---------- Kategória modál ----------
 function openCategoryModal() {
-  const icons = ["house", "shopping-cart", "bus", "car", "party-popper", "pill", "shirt", "smartphone", "package", "gamepad-2", "book-open", "coffee", "scissors", "gift", "dumbbell", "plane", "graduation-cap", "heart", "utensils", "wifi", "dog", "music", "briefcase", "fuel"];
-  const colors = ["#2563eb", "#16a34a", "#d97706", "#9333ea", "#dc2626", "#0891b2", "#4f46e5", "#64748b", "#db2777", "#65a30d"];
+  const icons = ["house", "shopping-cart", "bus", "car", "party-popper", "pill", "shirt", "smartphone", "package", "gamepad-2", "book-open", "coffee", "scissors", "gift", "dumbbell", "plane", "graduation-cap", "heart", "utensils", "wifi", "dog", "cat", "music", "briefcase", "fuel", "baby", "wrench", "stethoscope", "cigarette", "wine", "bike", "train-front", "shopping-bag", "hand-coins", "piggy-bank", "tv"];
+  const colors = ["#2563eb", "#16a34a", "#d97706", "#9333ea", "#dc2626", "#0891b2", "#4f46e5", "#64748b", "#db2777", "#65a30d", "#ea580c", "#0d9488"];
   openModal("Új kategória", `
     <div class="field"><label>Név</label><input type="text" id="cat-name" placeholder="Pl. Hobbi"></div>
+    <div class="field"><label>Szín</label>
+      <div class="color-grid" id="cat-colors">
+        ${colors.map((c, x) => `<button type="button" class="color-pick ${x === 0 ? "active" : ""}" data-color="${c}" style="background:${c}"></button>`).join("")}
+      </div></div>
     <div class="field"><label>Ikon</label>
       <div class="cat-grid" style="grid-template-columns:repeat(6,minmax(0,1fr))" id="cat-icons">
         ${icons.map((i, x) => `<button type="button" class="cat-pick icononly ${x === 0 ? "active" : ""}" data-icon="${i}">${ic(i)}</button>`).join("")}
@@ -1807,16 +1885,20 @@ function openCategoryModal() {
       <input type="text" id="cat-budget" inputmode="decimal" placeholder="Pl. 10k"></div>
     <div class="modal-actions"><button class="btn btn-primary" id="cat-save">Létrehozás</button></div>
   `);
-  let icon = icons[0];
+  let icon = icons[0], color = colors[0];
   $("#cat-icons").querySelectorAll(".cat-pick").forEach(b => b.onclick = () => {
     icon = b.dataset.icon;
     $("#cat-icons").querySelectorAll(".cat-pick").forEach(x => x.classList.toggle("active", x === b));
+  });
+  $("#cat-colors").querySelectorAll(".color-pick").forEach(b => b.onclick = () => {
+    color = b.dataset.color;
+    $("#cat-colors").querySelectorAll(".color-pick").forEach(x => x.classList.toggle("active", x === b));
   });
   $("#cat-save").onclick = async () => {
     const name = $("#cat-name").value.trim();
     if (!name) { toast("Adj nevet a kategóriának!"); return; }
     await state.store.insert("categories", {
-      name, icon, color: colors[state.cache.categories.length % colors.length],
+      name, icon, color,
       budget: parseAmountToBase($("#cat-budget").value) || 0, sort: state.cache.categories.length,
     });
     await refreshCache(); closeModal(); renderView(); toast("Kategória létrehozva", "check");

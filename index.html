@@ -120,9 +120,9 @@
           <button class="icon-btn-round" id="month-next" aria-label="Következő hónap"><i data-lucide="chevron-right"></i></button>
         </div>
         <div class="monthbar-right">
-          <div class="acct-switch hidden" id="acct-switch">
-            <button data-acct="self"><i data-lucide="user"></i><span>Saját</span></button>
-            <button data-acct="shared"><i data-lucide="users"></i><span>Közös</span></button>
+          <div class="acct-wrap hidden" id="acct-wrap">
+            <button class="acct-btn" id="acct-btn"><i data-lucide="wallet"></i><span id="acct-label">Saját</span><i data-lucide="chevron-down"></i></button>
+            <div class="acct-menu hidden" id="acct-menu"></div>
           </div>
           <button class="btn btn-primary btn-sm topbar-add" id="btn-quick-add"><i data-lucide="plus"></i> Új tétel</button>
         </div>
