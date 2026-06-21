@@ -917,7 +917,9 @@ function txItemHtml(t) {
 function bindTxItems(scope) {
   scope.querySelectorAll("[data-complete]").forEach(b => b.onclick = async (e) => {
     e.stopPropagation();
-    await state.store.update("transactions", b.dataset.complete, { pending: false });
+    const t = state.cache.transactions.find(x => x.id === b.dataset.complete);
+    if (t && isTransfer(t)) await completeTransfer(t);
+    else await state.store.update("transactions", b.dataset.complete, { pending: false });
     await refreshCache(); renderView(); toast("Tétel teljesítve", "check");
   });
   scope.querySelectorAll("[data-txid]").forEach(item => item.onclick = () => {
@@ -2064,13 +2066,13 @@ async function doTransfer({ amount, date, note, destId }) {
     // forrás láb (kimenő)
     if (state.store.setCtx) state.store.setCtx(ctxOf(srcId));
     await state.store.insert("transactions", {
-      type: "transfer", amount, date, note: note || null, pending: false,
+      type: "transfer", amount, date, note: note || null, pending: isFutureDate(date),
       transfer_id: tid, transfer_dir: "out", transfer_peer_id: destId, transfer_peer_name: accountName(destId),
     });
     // cél láb (bejövő)
     if (state.store.setCtx) state.store.setCtx(ctxOf(destId));
     await state.store.insert("transactions", {
-      type: "transfer", amount, date, note: note || null, pending: false,
+      type: "transfer", amount, date, note: note || null, pending: isFutureDate(date),
       transfer_id: tid, transfer_dir: "in", transfer_peer_id: srcId, transfer_peer_name: accountName(srcId),
     });
   } finally {
@@ -2103,6 +2105,24 @@ function openTransferView(t) {
       toast("Átvezetés törölve");
     } catch (e) { toast("A törlés nem sikerült"); }
   };
+}
+
+// Mindkét láb teljesítése (pending → false) a közös transfer_id alapján
+async function completeTransfer(t) {
+  const tid = t.transfer_id;
+  const ctxOf = (id) => (id === "self" ? null : id);
+  const prev = state.store.ctxHousehold;
+  await state.store.update("transactions", t.id, { pending: false });
+  if (tid && state.store.setCtx) {
+    try {
+      state.store.setCtx(ctxOf(t.transfer_peer_id));
+      const peerTx = await state.store.list("transactions");
+      const peer = peerTx.find(x => x.transfer_id === tid);
+      if (peer) await state.store.update("transactions", peer.id, { pending: false });
+    } finally {
+      state.store.setCtx(prev || null);
+    }
+  }
 }
 
 // Mindkét láb törlése a közös transfer_id alapján (a párja a másik számla kontextusában van)

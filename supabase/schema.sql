@@ -162,56 +162,73 @@ drop policy if exists "profiles_delete" on public.profiles;
 create policy "profiles_delete" on public.profiles
   for delete using (auth.uid() = id);
 
+-- ---------- Közös fiók / zsebek alapjai (hogy a policyk ÖNÁLLÓAN is háztartás-tudatosak legyenek) ----------
+-- A households/household_members táblákat és az RPC-ket a sharing.sql hozza létre. Itt csak azt biztosítjuk,
+-- hogy a megosztott táblák policyjei MINDIG háztartás-tudatosak legyenek – így a schema.sql újrafuttatása
+-- SEM töri el a közös láthatóságot (a társ továbbra is látja a közös tételeket).
+alter table public.transactions add column if not exists household_id uuid;
+alter table public.categories   add column if not exists household_id uuid;
+alter table public.goals        add column if not exists household_id uuid;
+
+create or replace function public.is_household_member(hid uuid)
+returns boolean language plpgsql security definer set search_path = public stable as $$
+begin
+  if hid is null then return false; end if;
+  if to_regclass('public.household_members') is null then return false; end if; -- a sharing.sql még nem futott
+  return exists (select 1 from public.household_members where household_id = hid and user_id = auth.uid());
+end; $$;
+grant execute on function public.is_household_member(uuid) to authenticated;
+
 -- ---- CATEGORIES ----
 drop policy if exists "categories_select" on public.categories;
 create policy "categories_select" on public.categories
-  for select using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id or (household_id is not null and public.is_household_member(household_id)));
 
 drop policy if exists "categories_insert" on public.categories;
 create policy "categories_insert" on public.categories
-  for insert with check (auth.uid() = user_id);
+  for insert with check (auth.uid() = user_id and (household_id is null or public.is_household_member(household_id)));
 
 drop policy if exists "categories_update" on public.categories;
 create policy "categories_update" on public.categories
-  for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
+  for update using (auth.uid() = user_id or (household_id is not null and public.is_household_member(household_id)));
 
 drop policy if exists "categories_delete" on public.categories;
 create policy "categories_delete" on public.categories
-  for delete using (auth.uid() = user_id);
+  for delete using (auth.uid() = user_id or (household_id is not null and public.is_household_member(household_id)));
 
 -- ---- TRANSACTIONS ----
 drop policy if exists "transactions_select" on public.transactions;
 create policy "transactions_select" on public.transactions
-  for select using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id or (household_id is not null and public.is_household_member(household_id)));
 
 drop policy if exists "transactions_insert" on public.transactions;
 create policy "transactions_insert" on public.transactions
-  for insert with check (auth.uid() = user_id);
+  for insert with check (auth.uid() = user_id and (household_id is null or public.is_household_member(household_id)));
 
 drop policy if exists "transactions_update" on public.transactions;
 create policy "transactions_update" on public.transactions
-  for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
+  for update using (auth.uid() = user_id or (household_id is not null and public.is_household_member(household_id)));
 
 drop policy if exists "transactions_delete" on public.transactions;
 create policy "transactions_delete" on public.transactions
-  for delete using (auth.uid() = user_id);
+  for delete using (auth.uid() = user_id or (household_id is not null and public.is_household_member(household_id)));
 
 -- ---- GOALS ----
 drop policy if exists "goals_select" on public.goals;
 create policy "goals_select" on public.goals
-  for select using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id or (household_id is not null and public.is_household_member(household_id)));
 
 drop policy if exists "goals_insert" on public.goals;
 create policy "goals_insert" on public.goals
-  for insert with check (auth.uid() = user_id);
+  for insert with check (auth.uid() = user_id and (household_id is null or public.is_household_member(household_id)));
 
 drop policy if exists "goals_update" on public.goals;
 create policy "goals_update" on public.goals
-  for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
+  for update using (auth.uid() = user_id or (household_id is not null and public.is_household_member(household_id)));
 
 drop policy if exists "goals_delete" on public.goals;
 create policy "goals_delete" on public.goals
-  for delete using (auth.uid() = user_id);
+  for delete using (auth.uid() = user_id or (household_id is not null and public.is_household_member(household_id)));
 
 -- ---- RECURRING ----
 drop policy if exists "recurring_select" on public.recurring;
