@@ -232,6 +232,14 @@ const isFutureDate = (str) => new Date(str + "T00:00:00") > today0();
 const isPending = (t) => t.pending === true || t.pending === "true";
 // Megtakarítás-felhasználás: bevétel típusú, de cél megvalósításából (külön kezeljük)
 const isWithdraw = (t) => t.type === "income" && (t.from_savings === true || t.from_savings === "true");
+// Számlák közötti átvezetés (két láb: 'out' a forrásnál, 'in' a célnál) – se nem bevétel, se nem kiadás
+const isTransfer = (t) => t.type === "transfer";
+// Egy tétel hatása az adott számla KÖLTŐPÉNZ-egyenlegére (+ befelé, − kifelé)
+function txBalanceDelta(t) {
+  const a = Number(t.amount) || 0;
+  if (isTransfer(t)) return (t.transfer_dir === "in") ? a : -a;
+  return (t.type === "income") ? a : -a; // a kiadás és a megtakarítás is csökkenti a költőpénzt
+}
 // "realized" = teljesített tételek (ezek számítanak a statisztikába); a pending kimarad
 const realized = (list) => list.filter(t => !isPending(t));
 const realizedOfMonth = (d = state.month) => realized(txOfMonth(d));
@@ -306,14 +314,21 @@ function categoryMonthlyAvg(catId, beforeMonth = state.month) {
 
 // ---------- Egyenleg-korrekció (kezdő egyenleg) – számlánként, eszközszinten ----------
 const acctKey = () => (state.account && state.account !== "self" ? state.account : "self");
+// Az összes számla (Saját + zsebek/közös) – az átvezetés cél-választójához
+function allAccounts() {
+  return [{ id: "self", name: "Saját" }, ...(state.households || []).map(h => ({ id: h.id, name: h.name }))];
+}
+function accountName(id) {
+  if (id === "self" || id == null) return "Saját";
+  return (state.households || []).find(h => h.id === id)?.name || "Számla";
+}
 function getOpening() { const o = getSettings().openings; const v = o && o[acctKey()]; return v ? v : null; }
 // A jelenleg vezetett nettó egy adott dátumig (korrekció nélkül) – a korrekció kiszámításához
 function trackedNetUpTo(dateStr) {
   let sum = 0;
   for (const t of state.cache.transactions) {
     if ((t.date || "") > dateStr) continue;
-    const a = Number(t.amount) || 0;
-    if (t.type === "income") sum += a; else sum -= a;
+    sum += txBalanceDelta(t); // bevétel +, kiadás/megtakarítás/átvezetés-ki −, átvezetés-be +
   }
   return sum;
 }
@@ -326,8 +341,7 @@ function carryoverInto(d = state.month) {
   for (const t of state.cache.transactions) {
     if ((t.date || "") >= start) continue;
     if (isPending(t)) continue; // a még KIFIZETETLEN korábbi tételek nem a maradékba, hanem az aktuális hónap látókörébe számítanak (áthúzódnak)
-    const a = Number(t.amount) || 0;
-    if (t.type === "income") sum += a; else sum -= a; // kiadás és megtakarítás is csökkenti a maradékot
+    sum += txBalanceDelta(t); // bevétel +, kiadás/megtakarítás/átvezetés-ki −, átvezetés-be +
   }
   const op = getOpening();
   if (op) sum += Number(op.amount) || 0; // a korrekció állandó alapszint
@@ -740,9 +754,10 @@ function renderDashboard(el) {
   const expenseAll = sumBy(txAll, "expense");
   const savingAll = sumBy(txAll, "saving");
   const overdue = overduePending();   // korábbról áthúzódó, kifizetetlen tételek
-  const overdueNet = overdue.reduce((s, t) => s + (t.type === "income" ? Number(t.amount || 0) : -Number(t.amount || 0)), 0);
+  const overdueNet = overdue.reduce((s, t) => s + txBalanceDelta(t), 0);
+  const transferNet = txAll.reduce((s, t) => s + (isTransfer(t) ? txBalanceDelta(t) : 0), 0); // számlák közötti átvezetések nettója (se nem bevétel, se nem kiadás)
   const carry = carryoverInto();   // előző hónapból átvitt maradék (a kifizetetlenek nélkül)
-  const balance = carry + incomeAll - expenseAll - savingAll + overdueNet;
+  const balance = carry + incomeAll - expenseAll - savingAll + overdueNet + transferNet;
   const pendingCount = txAll.filter(isPending).length;
   const plannedExpense = expenseAll - expenseR;
   const plannedIncome = incomePureAll - incomePureR;
@@ -757,7 +772,7 @@ function renderDashboard(el) {
   let projHtml = "";
   if (cur) {
     const projected = projectMonthExpense();          // szokás + rendszeresség alapján
-    const projBalance = carry + projectMonthIncome() - projected - savingAll + overdueNet;
+    const projBalance = carry + projectMonthIncome() - projected - savingAll + overdueNet + transferNet;
     projHtml = `<div class="banner ${projBalance < 0 ? "warn" : "info"}">${ic("calculator")}<div><b>Hó végi előrejelzés:</b> szokásaid és a rendszeres tételeid alapján kb. <b>${fmt(projected)}</b> lesz az összes kiadásod, így várhatóan <b>${fmt(projBalance)}</b> marad a hónap végén.</div></div>`;
   }
 
@@ -870,23 +885,31 @@ function txItemHtml(t) {
   const goal = t.goal_id ? goalById(t.goal_id) : null;
   const pending = isPending(t);
   const withdraw = isWithdraw(t);
+  const transfer = isTransfer(t);
+  const transferIn = transfer && t.transfer_dir === "in";
   let iconN, color, tint;
-  if (withdraw) { iconN = "piggy-bank"; color = "var(--teal)"; tint = "var(--surface-2)"; }
+  if (transfer) { iconN = "arrow-left-right"; color = "var(--primary)"; tint = "var(--primary-soft)"; }
+  else if (withdraw) { iconN = "piggy-bank"; color = "var(--teal)"; tint = "var(--surface-2)"; }
   else if (t.type === "income") { iconN = "arrow-down-left"; color = "var(--green)"; tint = "var(--green-soft)"; }
   else if (t.type === "saving") { iconN = goal?.icon || "piggy-bank"; color = "var(--primary)"; tint = "var(--primary-soft)"; }
   else { iconN = cat?.icon || "package"; color = cat?.color || "var(--text-muted)"; tint = cat?.color ? cat.color + "22" : "var(--surface-2)"; }
-  const sub = withdraw ? "Felhasznált megtakarítás"
+  const peerName = transfer ? (t.transfer_peer_name || accountName(t.transfer_peer_id)) : "";
+  const sub = transfer ? (transferIn ? `Átvezetés ← ${esc(peerName)}` : `Átvezetés → ${esc(peerName)}`)
+    : withdraw ? "Felhasznált megtakarítás"
     : t.type === "income" ? "Bevétel"
     : t.type === "saving" ? `Megtakarítás${goal ? " → " + esc(goal.name) : ""}`
     : esc(cat?.name || "Egyéb");
-  const amtHtml = t.type === "income" ? fmtHTML(t.amount, { plus: true }) : fmtHTML(-Math.abs(Number(t.amount)));
-  const badge = pending ? `<span class="tx-badge">${ic("clock")} tervezett</span>` : "";
+  const amtHtml = transfer
+    ? (transferIn ? fmtHTML(t.amount, { plus: true }) : fmtHTML(-Math.abs(Number(t.amount))))
+    : t.type === "income" ? fmtHTML(t.amount, { plus: true }) : fmtHTML(-Math.abs(Number(t.amount)));
+  const badge = pending ? `<span class="tx-badge">${ic("clock")} tervezett</span>`
+    : transfer ? `<span class="tx-badge">${ic("arrow-left-right")} átvezetés</span>` : "";
   const completeBtn = pending ? `<button class="tx-complete" data-complete="${t.id}" title="Megjelölés teljesítettként">${ic("check")}</button>` : "";
   return `<div class="tx-item ${pending ? "pending" : ""}" data-txid="${t.id}">
     <div class="tx-ico" style="background:${tint};color:${color}">${ic(iconN)}</div>
-    <div class="tx-info"><div class="tx-name">${esc(t.note) || sub}</div><div class="tx-cat">${sub}${t.recurring_id ? ic("repeat") : ""}${badge}</div></div>
+    <div class="tx-info"><div class="tx-name">${esc(t.note) || (transfer ? "Átvezetés" : sub)}</div><div class="tx-cat">${sub}${t.recurring_id ? ic("repeat") : ""}${badge}</div></div>
     ${completeBtn}
-    <div class="tx-amount ${t.type}">${amtHtml}</div>
+    <div class="tx-amount ${transfer ? "transfer" : t.type}">${amtHtml}</div>
   </div>`;
 }
 
@@ -945,6 +968,7 @@ function renderTransactions(el) {
         <option value="expense">Kiadás</option>
         <option value="income">Bevétel</option>
         <option value="saving">Megtakarítás</option>
+        <option value="transfer">Átvezetés</option>
       </select>
       <select id="tx-filter-cat"><option value="all">Minden kategória</option>${catOptions}</select>
     </div>
@@ -966,6 +990,8 @@ function renderBudget(el) {
   const income = sumBy(tx, "income");
   const allocated = state.cache.categories.reduce((s, c) => s + Number(c.budget || 0), 0);
   const free = income - allocated;
+  const transfersOut = tx.filter(t => isTransfer(t) && t.transfer_dir === "out").reduce((s, t) => s + Number(t.amount || 0), 0);
+  const transfersIn = tx.filter(t => isTransfer(t) && t.transfer_dir === "in").reduce((s, t) => s + Number(t.amount || 0), 0);
 
   const catRows = state.cache.categories.map(c => `
     <div class="list-edit-row" data-catid="${c.id}">
@@ -995,6 +1021,7 @@ function renderBudget(el) {
       <div>Havi bevétel: <b>${fmt(income)}</b> · Keretekre szétosztva: <b>${fmt(allocated)}</b> ·
       ${free >= 0 ? `Szabadon maradt: <b>${fmt(free)}</b>` : `<b>Túltervezés: ${fmt(-free)}</b> – csökkentsd a kereteket!`}</div>
     </div>
+    ${(transfersIn || transfersOut) ? `<div class="banner info">${ic("arrow-left-right")}<div>Számlák közötti átvezetés ebben a hónapban: ${transfersIn ? `<b style="color:var(--green)">+${fmt(transfersIn)}</b> be` : ""}${transfersIn && transfersOut ? " · " : ""}${transfersOut ? `<b>−${fmt(transfersOut)}</b> ki` : ""}. Ez <b>nem</b> bevétel és <b>nem</b> kiadás – csak az egyenleget mozgatja.</div></div>` : ""}
     <div class="card">
       <div class="card-title">Havi keretek kategóriánként
         <button class="btn-link" id="btn-add-cat">${ic("plus")} Kategória</button></div>
@@ -1743,11 +1770,18 @@ function openTxModal(tx = null, preset = {}) {
   const canShare = false; // a számlaváltó modell váltotta ki a "közös" pipát   // van összecsatolt közös fiók
   const myName = state.cache.profile?.name || state.user?.user_metadata?.name || "Társ";
 
+  // Meglévő átvezetést külön, egyszerű nézetben kezelünk (két láb, két számla)
+  if (isEdit && tx.type === "transfer") return openTransferView(tx);
+  // Átvezetés csak felhő módban, és ha van legalább 2 számla (Saját + zseb/közös)
+  const canTransfer = state.store.mode === "cloud" && allAccounts().length >= 2;
+  let transferDest = preset.transfer_dest || allAccounts().find(a => a.id !== state.account)?.id || null;
+
   openModal(isEdit ? "Tétel szerkesztése" : "Új tétel", `
     <div class="type-switch" id="tx-type-switch">
       <button data-type="expense" class="${type === "expense" ? "active" : ""}">${ic("arrow-up-right")} Kiadás</button>
       <button data-type="income" class="${type === "income" ? "active" : ""}">${ic("arrow-down-left")} Bevétel</button>
       <button data-type="saving" class="${type === "saving" ? "active" : ""}">${ic("piggy-bank")} Félretétel</button>
+      ${canTransfer ? `<button data-type="transfer" class="${type === "transfer" ? "active" : ""}">${ic("arrow-left-right")} Átvezetés</button>` : ""}
     </div>
     <div class="field">
       <div class="amount-wrap">
@@ -1778,6 +1812,13 @@ function openTxModal(tx = null, preset = {}) {
       <select id="tx-goal">${goalOptions || `<option value="">Nincs cél – általános megtakarítás</option>`}</select>
       <p class="field-hint">Közös célnál a befizetés a te megtakarításodba számít, a cél összege pedig mindkettőtöknél nő.</p>
     </div>
+    <div class="field" id="tx-transfer-field" style="${type === "transfer" ? "" : "display:none"}">
+      <label>Melyik számlára vezeted át?</label>
+      <select id="tx-transfer-dest">
+        ${allAccounts().filter(a => a.id !== state.account).map(a => `<option value="${a.id}" ${a.id === transferDest ? "selected" : ""}>${esc(a.name)}</option>`).join("")}
+      </select>
+      <p class="field-hint">Az összeg a(z) <b>${esc(accountName(state.account))}</b> számláról ide kerül át. <b>Nem</b> bevétel és <b>nem</b> kiadás – csak a két számla egyenlegét mozgatja, és mindkét számlán megjelenik a Tételeknél.</p>
+    </div>
     ${canShare ? `<div class="field" id="tx-shared-field" style="${type === "expense" ? "" : "display:none"}">
       <label class="check-row"><input type="checkbox" id="tx-shared" ${preset.shared ? "checked" : ""}> ${ic("users")} Közös kiadás (a közös kasszába)</label>
     </div>` : ""}
@@ -1792,7 +1833,7 @@ function openTxModal(tx = null, preset = {}) {
       <p class="field-hint" id="tx-date-guide"></p>
       <p class="field-hint" id="tx-future-hint" style="display:none">Jövőbeli dátum – <b>tervezett</b> tételként kerül be: a hó végi egyenlegbe beleszámít, a statisztikába még nem. Később a tételsoron a pipa gombbal jelölheted teljesítettnek.</p>
     </div>
-    <div class="field">
+    <div class="field" id="tx-recur-field">
       <label class="check-row"><input type="checkbox" id="tx-recurring" ${linkedRec ? "checked" : ""}> ${ic("repeat")} Ismétlődő tétel</label>
       <div id="tx-recur-opts" style="${linkedRec ? "" : "display:none"}">
         <div class="freq-row">
@@ -1819,6 +1860,8 @@ function openTxModal(tx = null, preset = {}) {
     $("#tx-type-switch").querySelectorAll("button").forEach(x => x.classList.toggle("active", x === b));
     $("#tx-cat-field").style.display = type === "expense" ? "" : "none";
     $("#tx-goal-field").style.display = type === "saving" ? "" : "none";
+    const tf = $("#tx-transfer-field"); if (tf) tf.style.display = type === "transfer" ? "" : "none";
+    const rf = $("#tx-recur-field"); if (rf) rf.style.display = type === "transfer" ? "none" : ""; // átvezetés nem ismétlődő
     const sf = $("#tx-shared-field"); if (sf) sf.style.display = type === "expense" ? "" : "none";
   });
 
@@ -1923,6 +1966,17 @@ function openTxModal(tx = null, preset = {}) {
     const note = $("#tx-note").value.trim();
     const date = $("#tx-date").value || todayStr();
     const pending = isFutureDate(date);
+    // ----- Számlák közötti átvezetés: két láb (forrás + cél), nem bevétel/kiadás -----
+    if (type === "transfer") {
+      const destId = $("#tx-transfer-dest")?.value;
+      if (!destId || destId === state.account) { toast("Válassz egy másik cél-számlát!"); return; }
+      try {
+        await doTransfer({ amount, date, note, destId });
+        await refreshCache(); closeModal(); renderView();
+        toast("Átvezetés rögzítve mindkét számlán", "check");
+      } catch (e) { toast("Az átvezetés nem sikerült – próbáld újra"); }
+      return;
+    }
     const recurOn = $("#tx-recurring")?.checked;
     const unit = $("#tx-recur-unit")?.value || "month";
     const count = Math.max(1, parseInt($("#tx-recur-count")?.value, 10) || 1);
@@ -1997,6 +2051,76 @@ function openTxModal(tx = null, preset = {}) {
   };
 
   if (!isEdit) setTimeout(() => $("#tx-amount").focus(), 100);
+}
+
+// ---------- Számlák közötti átvezetés ----------
+// Két lábat ír: 'out' a forrás (aktuális) számlán, 'in' a cél számlán, közös transfer_id-vel.
+async function doTransfer({ amount, date, note, destId }) {
+  const srcId = state.account;               // 'self' vagy household id
+  const tid = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : (Date.now() + "-" + Math.random().toString(36).slice(2));
+  const ctxOf = (id) => (id === "self" ? null : id);
+  const prev = state.store.ctxHousehold;
+  try {
+    // forrás láb (kimenő)
+    if (state.store.setCtx) state.store.setCtx(ctxOf(srcId));
+    await state.store.insert("transactions", {
+      type: "transfer", amount, date, note: note || null, pending: false,
+      transfer_id: tid, transfer_dir: "out", transfer_peer_id: destId, transfer_peer_name: accountName(destId),
+    });
+    // cél láb (bejövő)
+    if (state.store.setCtx) state.store.setCtx(ctxOf(destId));
+    await state.store.insert("transactions", {
+      type: "transfer", amount, date, note: note || null, pending: false,
+      transfer_id: tid, transfer_dir: "in", transfer_peer_id: srcId, transfer_peer_name: accountName(srcId),
+    });
+  } finally {
+    if (state.store.setCtx) state.store.setCtx(prev || null);
+  }
+}
+
+// Meglévő átvezetés egyszerű nézete: részletek + törlés (mindkét számláról)
+function openTransferView(t) {
+  const dirIn = t.transfer_dir === "in";
+  const peer = t.transfer_peer_name || accountName(t.transfer_peer_id);
+  const here = accountName(state.account);
+  openModal("Átvezetés", `
+    <div class="banner info" style="margin-bottom:14px">${ic("arrow-left-right")}<div>
+      ${dirIn
+        ? `<b>${fmt(t.amount, { force: true })}</b> érkezett ide (<b>${esc(here)}</b>) innen: <b>${esc(peer)}</b>.`
+        : `<b>${fmt(t.amount, { force: true })}</b> átvezetve innen (<b>${esc(here)}</b>) ide: <b>${esc(peer)}</b>.`}
+      <br><span style="color:var(--text-muted);font-size:13px">Dátum: ${esc(t.date)}${t.note ? " · " + esc(t.note) : ""}</span>
+    </div></div>
+    <p class="field-hint" style="margin-bottom:16px">Az átvezetés <b>nem</b> bevétel és <b>nem</b> kiadás – csak a két számla egyenlegét mozgatja, ezért a statisztikába és a költségvetésbe nem számít bele. Mindkét számlán megjelenik.</p>
+    <div class="modal-actions">
+      <button class="btn btn-danger" id="tr-delete">${ic("trash-2")} Törlés (mindkét számláról)</button>
+    </div>
+  `);
+  $("#tr-delete").onclick = async () => {
+    if (!(await askConfirm({ title: "Átvezetés törlése", message: "Töröljük az átvezetést mindkét számláról?", okText: "Törlés", danger: true }))) return;
+    try {
+      await deleteTransfer(t);
+      await refreshCache(); closeModal(); renderView();
+      toast("Átvezetés törölve");
+    } catch (e) { toast("A törlés nem sikerült"); }
+  };
+}
+
+// Mindkét láb törlése a közös transfer_id alapján (a párja a másik számla kontextusában van)
+async function deleteTransfer(t) {
+  const tid = t.transfer_id;
+  const ctxOf = (id) => (id === "self" ? null : id);
+  const prev = state.store.ctxHousehold;
+  await state.store.remove("transactions", t.id);
+  if (tid && state.store.setCtx) {
+    try {
+      state.store.setCtx(ctxOf(t.transfer_peer_id));
+      const peerTx = await state.store.list("transactions");
+      const peer = peerTx.find(x => x.transfer_id === tid);
+      if (peer) await state.store.remove("transactions", peer.id);
+    } finally {
+      state.store.setCtx(prev || null);
+    }
+  }
 }
 
 // ---------- Cél modál ----------

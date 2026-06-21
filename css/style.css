@@ -326,6 +326,7 @@ input, select, textarea { font-family: inherit; font-size: 16px; color: var(--te
 .tx-cat .lucide { width: 13px; height: 13px; }
 .tx-amount { font-weight: 700; font-size: 15px; white-space: nowrap; }
 .tx-amount.income { color: var(--green); }
+.tx-amount.transfer { color: var(--primary); }
 .tx-amount.saving { color: var(--primary); }
 
 .tx-item.pending { border-style: dashed; background: var(--amber-soft); }

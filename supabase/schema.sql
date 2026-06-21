@@ -49,7 +49,7 @@ create table if not exists public.categories (
 create table if not exists public.transactions (
   id           uuid primary key default gen_random_uuid(),
   user_id      uuid not null references auth.users(id) on delete cascade,
-  type         text not null check (type in ('expense', 'income', 'saving')),
+  type         text not null check (type in ('expense', 'income', 'saving', 'transfer')),
   amount       numeric not null check (amount > 0),
   category_id  uuid references public.categories(id) on delete set null,
   goal_id      uuid,
@@ -97,6 +97,13 @@ create table if not exists public.recurring (
 -- Ezek hozzáadják az új oszlopokat, ha még hiányoznak. Hibamentes, ha már léteznek.
 alter table public.transactions add column if not exists pending boolean default false;
 alter table public.transactions add column if not exists from_savings boolean default false;
+-- Számlák közötti átvezetés (két láb, transfer_id-vel összekötve, transfer_dir = 'out'/'in')
+alter table public.transactions add column if not exists transfer_id        uuid;
+alter table public.transactions add column if not exists transfer_dir       text;
+alter table public.transactions add column if not exists transfer_peer_id   text;
+alter table public.transactions add column if not exists transfer_peer_name text;
+alter table public.transactions drop constraint if exists transactions_type_check;
+alter table public.transactions add  constraint transactions_type_check check (type in ('expense', 'income', 'saving', 'transfer'));
 alter table public.recurring    add column if not exists interval_unit  text    default 'month';
 alter table public.recurring    add column if not exists interval_count integer default 1;
 alter table public.recurring    add column if not exists anchor_date    date;
