@@ -279,6 +279,30 @@ function goalSaved(goal) {
     state.cache.transactions.filter(t => t.type === "saving" && t.goal_id === goal.id)
       .reduce((s, t) => s + Number(t.amount || 0), 0);
 }
+// Az adott célból már FELHASZNÁLT összeg (a célhoz kötött megtakarítás-felhasználások).
+function goalUsed(goal) {
+  return state.cache.transactions
+    .filter(t => isWithdraw(t) && t.goal_id === goal.id)
+    .reduce((s, t) => s + Number(t.amount || 0), 0);
+}
+// Az adott célon még elérhető (összegyűjtött − felhasznált) megtakarítás.
+function goalAvailable(goal) { return Math.max(0, goalSaved(goal) - goalUsed(goal)); }
+
+// Egy kategória havi átlagos (teljesített) kiadása a megadott hónap ELŐTTI hónapokból.
+// A költségkeret-sávon ezt jelöli egy vékony vonal (mennyit szoktál itt költeni).
+function categoryMonthlyAvg(catId, beforeMonth = state.month) {
+  const cutoff = `${beforeMonth.getFullYear()}-${String(beforeMonth.getMonth() + 1).padStart(2, "0")}`;
+  const byMonth = {};
+  for (const t of state.cache.transactions) {
+    if (t.type !== "expense" || t.category_id !== catId || isPending(t)) continue;
+    const k = (t.date || "").slice(0, 7);
+    if (!k || k >= cutoff) continue; // csak a megelőző hónapok
+    byMonth[k] = (byMonth[k] || 0) + Number(t.amount || 0);
+  }
+  const months = Object.keys(byMonth);
+  if (!months.length) return 0;
+  return months.reduce((s, k) => s + byMonth[k], 0) / months.length;
+}
 
 // ---------- Egyenleg-korrekció (kezdő egyenleg) – számlánként, eszközszinten ----------
 const acctKey = () => (state.account && state.account !== "self" ? state.account : "self");
@@ -301,12 +325,23 @@ function carryoverInto(d = state.month) {
   let sum = 0;
   for (const t of state.cache.transactions) {
     if ((t.date || "") >= start) continue;
+    if (isPending(t)) continue; // a még KIFIZETETLEN korábbi tételek nem a maradékba, hanem az aktuális hónap látókörébe számítanak (áthúzódnak)
     const a = Number(t.amount) || 0;
     if (t.type === "income") sum += a; else sum -= a; // kiadás és megtakarítás is csökkenti a maradékot
   }
   const op = getOpening();
   if (op) sum += Number(op.amount) || 0; // a korrekció állandó alapszint
   return sum;
+}
+
+// A megadott hónap eleje ELŐTT dátumozott, még teljesítetlen (pending) tételek – "korábbról áthúzódó, kifizetetlen".
+function overduePending(d = state.month) {
+  const start = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+  return state.cache.transactions.filter(t => isPending(t) && (t.date || "") !== "" && (t.date || "") < start);
+}
+// A hónap teljes "látóköre": az adott hónapra dátumozott tételek + az áthúzódó kifizetetlenek.
+function monthScopeTx(d = state.month) {
+  return [...overduePending(d), ...txOfMonth(d)];
 }
 
 // ---------- Okos előrejelzés (szokások + rendszeresség) ----------
@@ -424,25 +459,31 @@ async function applyRecurring() {
     const count = Math.max(1, Number(r.interval_count || 1));
     const anchor = recurringAnchor(r);
     if (!anchor || isNaN(anchor)) continue;
+    // Manuális (kézi) mód: a könyvelt előfordulások TERVEZETT (pending) tételként kerülnek be –
+    // a felhasználónak kell kipipálnia, amikor ténylegesen levonták. A következő esedékességet is előre felvesszük.
+    const manual = r.auto_post === false || r.auto_post === "false";
     for (let n = 0, guard = 0; guard < 1000; n++, guard++) {
       const occ = occurrenceDate(anchor, unit, count, n);
       occ.setHours(0, 0, 0, 0);
-      if (occ > today) break;          // jövőbeli előfordulást még nem könyvelünk
+      const future = occ > today;
+      if (future && !manual) break;    // auto: jövőbeli előfordulást még nem könyvelünk
       const occStr = isoDate(occ);
       const dedupKey = r.id + "|" + occStr;
-      if (booked.has(dedupKey)) continue;
-      booked.add(dedupKey);
-      await state.store.insert("transactions", {
-        type: r.type, amount: r.amount, category_id: r.category_id || null,
-        note: r.name, date: occStr, recurring_id: r.id, pending: false,
-      });
-      added++;
+      if (!booked.has(dedupKey)) {
+        booked.add(dedupKey);
+        await state.store.insert("transactions", {
+          type: r.type, amount: r.amount, category_id: r.category_id || null,
+          note: r.name, date: occStr, recurring_id: r.id, pending: manual,
+        });
+        added++;
+      }
+      if (future) break;               // manuálisnál az első jövőbeli esedékesség után megállunk
     }
   }
   if (state.store.setCtx) state.store.setCtx(prevCtx || null); // kontextus visszaállítása
   if (added) {
     await refreshCache();
-    toast(`${added} ismétlődő tétel automatikusan könyvelve`, "check");
+    toast(`${added} ismétlődő tétel könyvelve`, "check");
   }
 }
 
@@ -625,7 +666,7 @@ function updateAcctSwitch() {
   });
 }
 async function createPocketFlow() {
-  const name = (prompt("Új zseb neve (pl. Vállalkozás):", "") || "").trim();
+  const name = await askText({ title: "Új zseb", label: "A zseb neve", placeholder: "Pl. Vállalkozás", okText: "Létrehozás" });
   if (!name) return;
   try {
     const hid = await state.store.createPocket(name);
@@ -647,7 +688,7 @@ function bindNav() {
   $("#modal-close").onclick = closeModal;
   $("#modal-overlay").onclick = (e) => { if (e.target === $("#modal-overlay")) closeModal(); };
   // Felső léc gombjai
-  $("#btn-settings").onclick = () => switchView("profile");
+  $("#btn-settings").onclick = () => switchView("settings");
   $("#appbar-profile").onclick = () => switchView("profile");
   $("#btn-hide").onclick = () => {
     state.hideAmounts = !state.hideAmounts;
@@ -676,7 +717,7 @@ function renderView() {
   state.charts = {};
   const renderers = {
     dashboard: renderDashboard, transactions: renderTransactions, budget: renderBudget,
-    goals: renderGoals, stats: renderStats, profile: renderProfile,
+    goals: renderGoals, stats: renderStats, profile: renderProfile, settings: renderSettings,
   };
   renderers[state.view](el);
   if (typeof updateAppbar === "function") updateAppbar();
@@ -698,8 +739,10 @@ function renderDashboard(el) {
   const incomePureAll = txAll.filter(t => t.type === "income" && !isWithdraw(t)).reduce((s, t) => s + Number(t.amount), 0);
   const expenseAll = sumBy(txAll, "expense");
   const savingAll = sumBy(txAll, "saving");
-  const carry = carryoverInto();   // előző hónapból átvitt maradék
-  const balance = carry + incomeAll - expenseAll - savingAll;
+  const overdue = overduePending();   // korábbról áthúzódó, kifizetetlen tételek
+  const overdueNet = overdue.reduce((s, t) => s + (t.type === "income" ? Number(t.amount || 0) : -Number(t.amount || 0)), 0);
+  const carry = carryoverInto();   // előző hónapból átvitt maradék (a kifizetetlenek nélkül)
+  const balance = carry + incomeAll - expenseAll - savingAll + overdueNet;
   const pendingCount = txAll.filter(isPending).length;
   const plannedExpense = expenseAll - expenseR;
   const plannedIncome = incomePureAll - incomePureR;
@@ -714,11 +757,12 @@ function renderDashboard(el) {
   let projHtml = "";
   if (cur) {
     const projected = projectMonthExpense();          // szokás + rendszeresség alapján
-    const projBalance = carry + projectMonthIncome() - projected - savingAll;
+    const projBalance = carry + projectMonthIncome() - projected - savingAll + overdueNet;
     projHtml = `<div class="banner ${projBalance < 0 ? "warn" : "info"}">${ic("calculator")}<div><b>Hó végi előrejelzés:</b> szokásaid és a rendszeres tételeid alapján kb. <b>${fmt(projected)}</b> lesz az összes kiadásod, így várhatóan <b>${fmt(projBalance)}</b> marad a hónap végén.</div></div>`;
   }
 
   const pendingBanner = pendingCount ? `<div class="banner info">${ic("calendar-clock")}<div><b>${pendingCount} tervezett tétel</b> ebben a hónapban – a hó végi egyenlegbe beleszámítanak, a statisztikába még nem. A Tételek fülön pipáld ki őket, amint megtörténtek.</div></div>` : "";
+  const overdueBanner = overdue.length ? `<div class="banner warn">${ic("calendar-clock")}<div><b>${overdue.length} korábbról áthúzódó, kifizetetlen tétel</b> – az egyenlegbe már beleszámítanak. A Tételek fülön pipáld ki, amint ténylegesen megtörténtek.</div></div>` : "";
 
   // Költségkeretek állapota (csak a teljesített kiadások töltik)
   const budgetCats = state.cache.categories.filter(c => Number(c.budget) > 0);
@@ -730,16 +774,18 @@ function renderDashboard(el) {
     const spent = spentByCat[c.id] || 0;
     const pct = Math.min(100, (spent / c.budget) * 100);
     const cls = spent > c.budget ? "over" : pct > 85 ? "warn" : "ok";
+    const avg = categoryMonthlyAvg(c.id, state.month);
+    const avgPct = avg > 0 ? Math.min(100, (avg / c.budget) * 100) : -1;
     return `<div class="budget-row">
       <div class="budget-row-head">
         <span class="budget-row-name"><span class="mini-ico" style="background:${c.color}22;color:${c.color}">${ic(c.icon)}</span><span>${esc(c.name)}</span></span>
         <span class="budget-row-vals"><b>${fmt(spent)}</b> / ${fmt(c.budget)}</span>
       </div>
-      <div class="progress"><div class="progress-fill ${cls}" data-w="${pct}"></div></div>
+      <div class="progress"><div class="progress-fill ${cls}" data-w="${pct}"></div>${avgPct >= 0 ? `<span class="avg-marker" style="left:${avgPct}%" title="Havi átlag: ${fmt(avg)}"></span>` : ""}</div>
     </div>`;
   }).join("");
 
-  const recent = txAll.slice(0, 6).map(txItemHtml).join("");
+  const recent = [...overdue, ...txAll].slice(0, 6).map(txItemHtml).join("");
 
   const goalsMini = state.cache.goals.filter(g => !g.done).slice(0, 3).map(g => {
     const saved = goalSaved(g);
@@ -792,12 +838,14 @@ function renderDashboard(el) {
       </div>
     </div>
 
+    ${overdueBanner}
     ${pendingBanner}
     ${projHtml}
 
     <div class="row-2">
       <div class="card">
         <div class="card-title">Költségkeretek <button class="btn-link" data-goto="budget">Szerkesztés ${ic("chevron-right")}</button></div>
+        ${budgetRows ? `<p class="field-hint avg-legend">${ic("minus")} A vékony függőleges vonal a kategória korábbi havi átlagát jelzi.</p>` : ""}
         ${budgetRows || `<div class="empty-state"><div class="empty-ico">${ic("wallet")}</div><p>Még nincsenek költségkeretek.<br>Állítsd be a Költségvetés fülön!</p></div>`}
       </div>
       <div class="card">
@@ -857,7 +905,7 @@ function bindTxItems(scope) {
 
 // ============ TRANZAKCIÓK ============
 function renderTransactions(el) {
-  const tx = txOfMonth();
+  const tx = monthScopeTx();
   let filterCat = "all", filterType = "all", search = "";
 
   function listHtml() {
@@ -866,16 +914,25 @@ function renderTransactions(el) {
     if (filterCat !== "all") list = list.filter(t => t.category_id === filterCat);
     if (search) list = list.filter(t => (t.note || "").toLowerCase().includes(search.toLowerCase()));
     if (!list.length) return `<div class="empty-state"><div class="empty-ico">${ic("search-x")}</div><p>Nincs találat ebben a hónapban.</p></div>`;
-    // napok szerint csoportosítva
+    // Korábbról áthúzódó (kifizetetlen) tételek külön, felül; utána a hónap napjai szerint csoportosítva
+    const monthStart = `${state.month.getFullYear()}-${String(state.month.getMonth() + 1).padStart(2, "0")}-01`;
+    const overdueList = list.filter(t => (t.date || "") < monthStart);
+    const inMonthList = list.filter(t => (t.date || "") >= monthStart);
+    let out = "";
+    if (overdueList.length) {
+      out += `<div class="tx-group-date overdue">${ic("calendar-clock")} Korábbról áthúzódó · kifizetetlen</div>` +
+        overdueList.sort((a, b) => (b.date || "").localeCompare(a.date || "")).map(txItemHtml).join("");
+    }
     const groups = {};
-    list.forEach(t => { (groups[t.date] = groups[t.date] || []).push(t); });
-    return Object.keys(groups).sort().reverse().map(date => {
+    inMonthList.forEach(t => { (groups[t.date] = groups[t.date] || []).push(t); });
+    out += Object.keys(groups).sort().reverse().map(date => {
       const d = new Date(date + "T00:00:00");
       const label = `${d.getMonth() + 1 + ". " + d.getDate()}. (${DAYS_HU[d.getDay()]})`;
       const dayTotal = groups[date].filter(t => t.type === "expense").reduce((s, t) => s + Number(t.amount), 0);
       return `<div class="tx-group-date">${label}${dayTotal ? ` · −${fmt(dayTotal)}` : ""}</div>` +
         groups[date].map(txItemHtml).join("");
     }).join("");
+    return out;
   }
 
   const catOptions = state.cache.categories.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join("");
@@ -925,7 +982,7 @@ function renderBudget(el) {
     const paused = r.active === false;
     return `<div class="list-edit-row ${paused ? "paused" : ""}">
       <span class="lab"><span class="mini-ico" style="background:${rtint};color:${rcolor}">${ic(rico)}</span>
-        <span class="lab-txt"><div>${esc(r.name)}</div><small style="color:var(--text-muted);font-weight:400">${freqText(r)} · ${r.type === "income" ? "bevétel" : "kiadás"}${paused ? " · szünetel" : ""}</small></span></span>
+        <span class="lab-txt"><div>${esc(r.name)}</div><small style="color:var(--text-muted);font-weight:400">${freqText(r)} · ${r.type === "income" ? "bevétel" : "kiadás"}${paused ? " · szünetel" : ""}${(r.auto_post === false || r.auto_post === "false") ? " · kézi pipálás" : ""}</small></span></span>
       <b style="font-size:14px;white-space:nowrap">${fmt(r.amount)}</b>
       <button class="icon-btn neutral" data-pauserec="${r.id}" data-on="${paused ? "0" : "1"}" title="${paused ? "Folytatás" : "Szüneteltetés"}">${ic(paused ? "play" : "pause")}</button>
       <button class="icon-btn" data-delrec="${r.id}" title="Törlés">${ic("trash-2")}</button>
@@ -971,13 +1028,13 @@ function renderBudget(el) {
     await refreshCache(); renderView(); toast(on ? "Ismétlődés szüneteltetve" : "Ismétlődés folytatva", "check");
   });
   el.querySelectorAll("[data-delcat]").forEach(b => b.onclick = async () => {
-    if (!confirm("Biztosan törlöd a kategóriát? A tételei 'Egyéb' nélkül maradnak.")) return;
+    if (!(await askConfirm({ title: "Kategória törlése", message: "Biztosan törlöd a kategóriát? A tételei 'Egyéb' nélkül maradnak.", okText: "Törlés", danger: true }))) return;
     await state.store.remove("categories", b.dataset.delcat);
     await refreshCache(); renderView(); toast("Kategória törölve");
   });
   $("#btn-add-rec").onclick = () => openRecurringModal();
   el.querySelectorAll("[data-delrec]").forEach(b => b.onclick = async () => {
-    if (!confirm("Törlöd az ismétlődő tételt? (A már könyvelt tételek megmaradnak.)")) return;
+    if (!(await askConfirm({ title: "Ismétlődő tétel törlése", message: "Törlöd az ismétlődő tételt? (A már könyvelt tételek megmaradnak.)", okText: "Törlés", danger: true }))) return;
     await state.store.remove("recurring", b.dataset.delrec);
     await refreshCache(); renderView(); toast("Ismétlődő tétel törölve");
   });
@@ -987,7 +1044,11 @@ function renderBudget(el) {
 function goalCardHtml(g) {
   const isShared = !!g.household_id;
   const saved = goalSaved(g);
+  const used = goalUsed(g);
+  const available = Math.max(0, saved - used);
   const pct = Math.min(100, (saved / g.target_amount) * 100);
+  const usedPct = Math.max(0, Math.min(pct, (used / g.target_amount) * 100));
+  const availPct = Math.max(0, pct - usedPct);
   const remaining = Math.max(0, g.target_amount - saved);
   let monthlyHtml = "";
   if (g.deadline && remaining > 0) {
@@ -1017,15 +1078,16 @@ function goalCardHtml(g) {
       <button class="icon-btn" data-delgoal="${g.id}" title="Törlés">${ic("trash-2")}</button>
     </div>
     <div class="goal-amounts"><span>Összegyűjtve: <b>${fmt(saved)}</b></span><span>Cél: <b>${fmt(g.target_amount)}</b></span></div>
-    <div class="progress" style="height:10px"><div class="progress-fill" data-w="${pct}"></div></div>
+    <div class="progress goal-progress" style="height:10px"><div class="progress-fill used" data-w="${usedPct}"></div><div class="progress-fill avail" data-w="${availPct}"></div></div>
     <div class="goal-amounts"><span>${Math.round(pct)}%</span><span>Még hiányzik: ${fmt(remaining)}</span></div>
+    ${used > 0 ? `<div class="goal-amounts"><span style="color:var(--green)">${ic("hand-coins")} Felhasználva: <b>${fmt(used)}</b></span><span>Elérhető: <b>${fmt(available)}</b></span></div>` : ""}
     ${monthlyHtml}
     ${contribHtml}
     ${done
       ? `<div class="goal-monthly done" style="margin-top:13px">${ic("circle-check")}<div>Megvalósítva – az összegyűjtött <b>${fmt(saved)}</b> a bevételekhez került.</div></div>`
       : `<div class="goal-actions">
           <button class="btn btn-ghost btn-sm" data-deposit="${g.id}" style="flex:1">${ic("piggy-bank")} Félreteszek rá</button>
-          ${saved > 0 ? `<button class="btn btn-primary btn-sm" data-realize="${g.id}" style="flex:1">${ic("circle-check")} Megvalósítás</button>` : ""}
+          ${available > 0 ? `<button class="btn btn-primary btn-sm" data-usegoal="${g.id}" style="flex:1">${ic("hand-coins")} Felhasználás</button>` : ""}
         </div>`}
   </div>`;
 }
@@ -1069,29 +1131,32 @@ function renderGoals(el) {
   const sExp = $("#btn-add-shared-exp"); if (sExp) sExp.onclick = () => openTxModal(null, { type: "expense", shared: true });
   el.querySelectorAll("[data-editgoal]").forEach(b => b.onclick = () => openGoalModal(goalById(b.dataset.editgoal)));
   el.querySelectorAll("[data-delgoal]").forEach(b => b.onclick = async () => {
-    if (!confirm("Biztosan törlöd a célt?")) return;
+    if (!(await askConfirm({ title: "Cél törlése", message: "Biztosan törlöd a célt?", okText: "Törlés", danger: true }))) return;
     await state.store.remove("goals", b.dataset.delgoal);
     await refreshCache(); renderView(); toast("Cél törölve");
   });
   el.querySelectorAll("[data-deposit]").forEach(b => b.onclick = () => {
     openTxModal(null, { type: "saving", goal_id: b.dataset.deposit });
   });
-  el.querySelectorAll("[data-realize]").forEach(b => b.onclick = async () => {
-    const g = goalById(b.dataset.realize); if (!g) return;
-    const amount = goalSaved(g);
-    if (amount <= 0) { toast("Még nincs összegyűjtött összeg"); return; }
-    if (!confirm(`Megvalósítod a(z) "${g.name}" célt?\n\nAz összegyűjtött ${fmt(amount, { force: true })} felhasznált megtakarításként jelenik meg (kiegészítésként, nem sima bevételként), és a cél lezárul.`)) return;
-    // "Megtakarítás felhasználás" könyvelése (from_savings) a megfelelő számlára, majd a cél lezárása
+  el.querySelectorAll("[data-usegoal]").forEach(b => b.onclick = async () => {
+    const g = goalById(b.dataset.usegoal); if (!g) return;
+    const avail = goalAvailable(g);
+    if (avail <= 0) { toast("Nincs elérhető megtakarítás ezen a célon"); return; }
+    const raw = await askText({ title: `Felhasználás – ${g.name}`, label: `Mennyit használsz fel? (elérhető: ${fmt(avail, { force: true })})`, placeholder: "Pl. 60k", okText: "Felhasználás", inputmode: "decimal" });
+    if (raw == null || raw === "") return;
+    const amount = parseAmountToBase(raw);
+    if (isNaN(amount) || amount <= 0) { toast("Adj meg érvényes összeget!"); return; }
+    if (amount > avail + 0.5) { toast("Nem használhatsz fel az elérhetőnél többet"); return; }
+    // Cél-felhasználás könyvelése (from_savings, a célhoz kötve) – a cél NEM zárul le, tovább gyűjthető
     const prev = state.store.ctxHousehold;
     if (g.household_id && state.store.setCtx) state.store.setCtx(g.household_id);
     try {
-      await state.store.insert("transactions", { type: "income", from_savings: true, amount, note: g.name + " (megtakarítás felhasználva)", date: todayStr(), pending: false });
+      await state.store.insert("transactions", { type: "income", from_savings: true, goal_id: g.id, amount, note: g.name + " (cél felhasználva)", date: todayStr(), pending: false });
     } finally {
       if (g.household_id && state.store.setCtx) state.store.setCtx(prev || null);
     }
-    await state.store.update("goals", g.id, { done: true });
     await refreshCache(); renderView();
-    toast("Cél megvalósítva – felhasznált megtakarításként könyvelve", "check");
+    toast("Felhasználva a megtakarításból", "check");
   });
 }
 
@@ -1323,6 +1388,15 @@ function renderProfile(el) {
   const op = getOpening();
   const acctName = state.account === "self" ? "Saját számla" : (state.household?.name || "Közös");
 
+  // Számla-összesítő (a jelenleg kiválasztott számlára)
+  const sumSpendable = trackedNetUpTo(todayStr()) + (op ? Number(op.amount) || 0 : 0);
+  const sumSaving = state.cache.transactions.reduce((s, t) =>
+    s + (t.type === "saving" ? Number(t.amount || 0) : 0) - (isWithdraw(t) ? Number(t.amount || 0) : 0), 0);
+  const sumNet = sumSpendable + sumSaving;
+  const moTx = realizedOfMonth();
+  const moIn = moTx.filter(t => t.type === "income" && !isWithdraw(t)).reduce((s, t) => s + Number(t.amount || 0), 0);
+  const moExp = sumBy(moTx, "expense");
+
   el.innerHTML = `
     <div class="section-title">Profil</div>
 
@@ -1334,34 +1408,12 @@ function renderProfile(el) {
     </div>
 
     <div class="card">
-      <div class="card-title">Megjelenés</div>
-      <div class="seg-theme" id="seg-theme">
-        <button data-theme="light" class="${theme === "light" ? "active" : ""}">${ic("sun")}<span>Világos</span></button>
-        <button data-theme="dark" class="${theme === "dark" ? "active" : ""}">${ic("moon")}<span>Sötét</span></button>
-        <button data-theme="system" class="${theme === "system" ? "active" : ""}">${ic("monitor-smartphone")}<span>Rendszer</span></button>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">Pénznem</div>
-      <div class="field" style="margin-bottom:0">
-        <label>Megjelenített valuta</label>
-        <div class="input-wrap">${ic("circle-dollar-sign")}<select id="cur-select">
-          ${Object.entries(CURRENCIES).map(([k, c]) => `<option value="${k}" ${k === curCode ? "selected" : ""}>${esc(c.label)}</option>`).join("")}
-        </select></div>
-        <p class="field-hint">Fő (tárolási) pénznem: <b>${esc(CURRENCIES[baseCurrency()].label)}</b>. Váltáskor csak a megjelenítés változik a mai árfolyamon – az eredeti összegek megmaradnak.</p>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">${ic("scale")} Egyenleg-korrekció <span style="color:var(--text-muted);font-weight:600">${esc(acctName)}</span></div>
-      <p class="field-hint" style="margin-bottom:12px">Ha frissen kezdted vezetni a pénzügyeid, az app egyenlege eltérhet a banki egyenlegtől (a kiinduló összeg ismeretlen). Add meg egy dátumra a TÉNYLEGES egyenleget, és az app ahhoz igazodik. <b>Elég egyszer megtenni</b> – utána, ha mindent rögzítesz, pontos marad.</p>
-      ${op ? `<div class="banner info">${ic("info")}<div>Aktív korrekció: <b>${fmt(op.amount, { plus: true, force: true })}</b> · ${esc(op.date)}</div></div>` : ""}
-      <div class="field"><label>Dátum</label><input type="date" id="adj-date" value="${op?.date || todayStr()}"></div>
-      <div class="field"><label>Tényleges egyenleg ezen a napon</label>
-        <div class="input-wrap">${ic("circle-dollar-sign")}<input type="text" id="adj-amount" inputmode="decimal" placeholder="Pl. 250000"></div></div>
-      <button class="btn btn-primary btn-block" id="adj-save">Korrekció mentése</button>
-      ${op ? `<button class="btn btn-ghost btn-block" id="adj-clear" style="margin-top:8px">Korrekció törlése</button>` : ""}
+      <div class="card-title">${ic("wallet")} Számla összesítő <span style="color:var(--text-muted);font-weight:600">${esc(acctName)}</span></div>
+      <div class="avg-row" style="font-size:15px"><span>${ic("wallet")} Költőpénz (egyenleg)</span><b style="color:${sumSpendable < 0 ? "var(--red)" : ""}">${fmtHTML(sumSpendable, { force: true })}</b></div>
+      <div class="avg-row"><span>${ic("piggy-bank")} Megtakarítás (félretéve)</span><b>${fmtHTML(sumSaving, { force: true })}</b></div>
+      <div class="avg-row" style="border-top:1.5px solid var(--border);font-weight:800"><span>${ic("layers")} Összes vagyon</span><b>${fmtHTML(sumNet, { force: true })}</b></div>
+      <div class="avg-row"><span>${ic("arrow-down-left")} E havi bevétel</span><b style="color:var(--green)">${fmtHTML(moIn)}</b></div>
+      <div class="avg-row"><span>${ic("arrow-up-right")} E havi kiadás</span><b style="color:var(--red)">${fmtHTML(moExp)}</b></div>
     </div>
 
     <div class="card">
@@ -1403,36 +1455,11 @@ function renderProfile(el) {
       <div id="fb-result" class="auth-error hidden" style="margin-top:10px"></div>
     </div>
 
-    <div class="card">
-      <div class="card-title">Alkalmazás</div>
-      <button class="btn btn-ghost btn-block" id="btn-install" style="margin-bottom:10px">${ic("download")} Telepítés telefonra / gépre</button>
-      <button class="btn btn-ghost btn-block" id="btn-export" style="margin-bottom:10px">${ic("file-down")} Adatok exportálása (CSV)</button>
-      <button class="btn btn-danger btn-block" id="btn-logout">${ic("log-out")} ${isCloud ? "Kijelentkezés" : "Kilépés a helyi módból"}</button>
-      ${!isCloud ? `<button class="btn btn-danger btn-block" id="btn-wipe" style="margin-top:10px">${ic("trash-2")} Helyi adatok törlése</button>` : ""}
-    </div>
-    <p style="text-align:center;color:var(--text-faint);font-size:12px">MoneyManage (MM) v1.4</p>
+    <button class="btn btn-ghost btn-block" id="btn-open-settings" style="margin-top:4px">${ic("settings")} Beállítások (megjelenés, pénznem, korrekció, app)</button>
+    <p style="text-align:center;color:var(--text-faint);font-size:12px;margin-top:14px">MoneyManage (MM) v1.4</p>
   `;
 
-  $("#seg-theme").querySelectorAll("button").forEach(b => b.onclick = () => { setSetting("theme", b.dataset.theme); applyTheme(); });
-
-  // ---- Egyenleg-korrekció ----
-  $("#adj-save").onclick = () => {
-    const d = $("#adj-date").value || todayStr();
-    const b = parseAmountToBase($("#adj-amount").value);
-    if (isNaN(b)) { toast("Adj meg érvényes egyenleget!"); return; }
-    const amount = Math.round((b - trackedNetUpTo(d)) * 100) / 100;
-    const o = getSettings().openings || {};
-    o[acctKey()] = { amount, date: d };
-    setSetting("openings", o);
-    renderView(); toast("Egyenleg-korrekció mentve", "check");
-  };
-  const adjClear = $("#adj-clear");
-  if (adjClear) adjClear.onclick = () => {
-    const o = getSettings().openings || {};
-    delete o[acctKey()];
-    setSetting("openings", o);
-    renderView(); toast("Korrekció törölve");
-  };
+  $("#btn-open-settings").onclick = () => switchView("settings");
 
   // ---- Közös fiók ----
   const btnInvite = $("#btn-new-invite");
@@ -1465,36 +1492,11 @@ function renderProfile(el) {
   };
   const btnLeave = $("#btn-leave-hh");
   if (btnLeave) btnLeave.onclick = async () => {
-    if (!confirm("Biztosan kilépsz a közös fiókból? A közös tételek/célok a társadnál megmaradnak.")) return;
+    if (!(await askConfirm({ title: "Kilépés a közös fiókból", message: "Biztosan kilépsz a közös fiókból? A közös tételek/célok a társadnál megmaradnak.", okText: "Kilépés", danger: true }))) return;
     try { await state.store.leaveHousehold(state.household.id); await refreshCache(); renderView(); toast("Kiléptél a közös fiókból"); }
     catch (e) { toast("Nem sikerült kilépni"); }
   };
 
-  $("#cur-select").onchange = async (e) => {
-    const from = currentCurrency();
-    const to = e.target.value;
-    const sel = e.target;
-    if (from === to) return;
-    sel.disabled = true;
-    // Veszteségmentes: csak a MEGJELENÍTÉST váltjuk, a tárolt (alap) összegek nem változnak.
-    setSetting("currency", to);
-    try {
-      await ensureRates();
-      if (to !== baseCurrency() && displayFactor() == null) {
-        // nincs árfolyam (offline) – visszaállás, hogy ne legyen téves megjelenítés
-        setSetting("currency", from); sel.value = from;
-        toast("Árfolyam lekérése sikertelen – ellenőrizd az internetet");
-      } else {
-        renderView();
-        toast(to === baseCurrency() ? "Megjelenítés: fő pénznem" : "Megjelenítés átváltva a mai árfolyamon", "check");
-      }
-    } catch (err) {
-      setSetting("currency", from); sel.value = from;
-      toast("Árfolyam lekérése sikertelen");
-    } finally {
-      sel.disabled = false;
-    }
-  };
   $("#btn-save-profile").onclick = async () => { await state.store.setProfile({ name: $("#profile-name").value.trim() }); await refreshCache(); renderView(); toast("Profil mentve", "check"); };
 
   // ---- Visszajelzés ----
@@ -1522,6 +1524,107 @@ function renderProfile(el) {
     }
   };
 
+}
+
+// ============ BEÁLLÍTÁSOK (külön a profiltól) ============
+function renderSettings(el) {
+  const isCloud = state.store.mode === "cloud";
+  const theme = getSettings().theme || "system";
+  const curCode = currentCurrency();
+  const op = getOpening();
+  const acctName = state.account === "self" ? "Saját számla" : (state.household?.name || "Közös");
+
+  el.innerHTML = `
+    <div class="section-title">Beállítások</div>
+
+    <div class="card">
+      <div class="card-title">Megjelenés</div>
+      <div class="seg-theme" id="seg-theme">
+        <button data-theme="light" class="${theme === "light" ? "active" : ""}">${ic("sun")}<span>Világos</span></button>
+        <button data-theme="dark" class="${theme === "dark" ? "active" : ""}">${ic("moon")}<span>Sötét</span></button>
+        <button data-theme="system" class="${theme === "system" ? "active" : ""}">${ic("monitor-smartphone")}<span>Rendszer</span></button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Pénznem</div>
+      <div class="field" style="margin-bottom:0">
+        <label>Megjelenített valuta</label>
+        <div class="input-wrap">${ic("circle-dollar-sign")}<select id="cur-select">
+          ${Object.entries(CURRENCIES).map(([k, c]) => `<option value="${k}" ${k === curCode ? "selected" : ""}>${esc(c.label)}</option>`).join("")}
+        </select></div>
+        <p class="field-hint">Fő (tárolási) pénznem: <b>${esc(CURRENCIES[baseCurrency()].label)}</b>. Váltáskor csak a megjelenítés változik a mai árfolyamon – az eredeti összegek megmaradnak.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">${ic("scale")} Egyenleg-korrekció <span style="color:var(--text-muted);font-weight:600">${esc(acctName)}</span></div>
+      <p class="field-hint" style="margin-bottom:12px">Ha frissen kezdted vezetni a pénzügyeid, az app egyenlege eltérhet a banki egyenlegtől. Add meg egy dátumra a TÉNYLEGES egyenleget, és az app ahhoz igazodik. <b>Elég egyszer megtenni</b> – utána, ha mindent rögzítesz, pontos marad.</p>
+      ${op ? `<div class="banner info">${ic("info")}<div>Aktív korrekció: <b>${fmt(op.amount, { plus: true, force: true })}</b> · ${esc(op.date)}</div></div>` : ""}
+      <div class="field"><label>Dátum</label><input type="date" id="adj-date" value="${op?.date || todayStr()}"></div>
+      <div class="field"><label>Tényleges egyenleg ezen a napon</label>
+        <div class="input-wrap">${ic("circle-dollar-sign")}<input type="text" id="adj-amount" inputmode="decimal" placeholder="Pl. 250000"></div></div>
+      <button class="btn btn-primary btn-block" id="adj-save">Korrekció mentése</button>
+      ${op ? `<button class="btn btn-ghost btn-block" id="adj-clear" style="margin-top:8px">Korrekció törlése</button>` : ""}
+    </div>
+
+    <div class="card">
+      <div class="card-title">Alkalmazás</div>
+      <button class="btn btn-ghost btn-block" id="btn-install" style="margin-bottom:10px">${ic("download")} Telepítés telefonra / gépre</button>
+      <button class="btn btn-ghost btn-block" id="btn-export" style="margin-bottom:10px">${ic("file-down")} Adatok exportálása (CSV)</button>
+      <button class="btn btn-danger btn-block" id="btn-logout">${ic("log-out")} ${isCloud ? "Kijelentkezés" : "Kilépés a helyi módból"}</button>
+      ${!isCloud ? `<button class="btn btn-danger btn-block" id="btn-wipe" style="margin-top:10px">${ic("trash-2")} Helyi adatok törlése</button>` : ""}
+    </div>
+    <p style="text-align:center;color:var(--text-faint);font-size:12px">MoneyManage (MM) v1.4</p>
+  `;
+
+  $("#seg-theme").querySelectorAll("button").forEach(b => b.onclick = () => { setSetting("theme", b.dataset.theme); applyTheme(); });
+
+  // ---- Egyenleg-korrekció ----
+  $("#adj-save").onclick = () => {
+    const d = $("#adj-date").value || todayStr();
+    const b = parseAmountToBase($("#adj-amount").value);
+    if (isNaN(b)) { toast("Adj meg érvényes egyenleget!"); return; }
+    const amount = Math.round((b - trackedNetUpTo(d)) * 100) / 100;
+    const o = getSettings().openings || {};
+    o[acctKey()] = { amount, date: d };
+    setSetting("openings", o);
+    renderView(); toast("Egyenleg-korrekció mentve", "check");
+  };
+  const adjClear = $("#adj-clear");
+  if (adjClear) adjClear.onclick = () => {
+    const o = getSettings().openings || {};
+    delete o[acctKey()];
+    setSetting("openings", o);
+    renderView(); toast("Korrekció törölve");
+  };
+
+  // ---- Pénznem ----
+  $("#cur-select").onchange = async (e) => {
+    const from = currentCurrency();
+    const to = e.target.value;
+    const sel = e.target;
+    if (from === to) return;
+    sel.disabled = true;
+    setSetting("currency", to);
+    try {
+      await ensureRates();
+      if (to !== baseCurrency() && displayFactor() == null) {
+        setSetting("currency", from); sel.value = from;
+        toast("Árfolyam lekérése sikertelen – ellenőrizd az internetet");
+      } else {
+        renderView();
+        toast(to === baseCurrency() ? "Megjelenítés: fő pénznem" : "Megjelenítés átváltva a mai árfolyamon", "check");
+      }
+    } catch (err) {
+      setSetting("currency", from); sel.value = from;
+      toast("Árfolyam lekérése sikertelen");
+    } finally {
+      sel.disabled = false;
+    }
+  };
+
+  // ---- Alkalmazás ----
   $("#btn-logout").onclick = logout;
   $("#btn-export").onclick = exportCSV;
   $("#btn-install").onclick = async () => {
@@ -1530,12 +1633,12 @@ function renderProfile(el) {
       await state.deferredInstall.userChoice;
       state.deferredInstall = null;
     } else {
-      alert("Telepítés:\n\nAndroidon (Chrome): menü → „Alkalmazás telepítése”\niPhone-on (Safari): Megosztás → „Hozzáadás a kezdőképernyőhöz”\nGépen (Chrome/Edge): a címsor jobb oldalán a telepítés ikon");
+      await askConfirm({ title: "Alkalmazás telepítése", message: "Androidon (Chrome): menü → „Alkalmazás telepítése”.<br>iPhone-on (Safari): Megosztás → „Hozzáadás a kezdőképernyőhöz”.<br>Gépen (Chrome/Edge): a címsor jobb szélén a telepítés ikon.", okText: "Értem" });
     }
   };
   const wipeBtn = $("#btn-wipe");
   if (wipeBtn) wipeBtn.onclick = async () => {
-    if (!confirm("Minden helyi adat (tételek, célok, keretek) VÉGLEGESEN törlődik. Biztos?")) return;
+    if (!(await askConfirm({ title: "Összes adat törlése", message: "Minden helyi adat (tételek, célok, keretek) VÉGLEGESEN törlődik. Biztos?", okText: "Törlés", danger: true }))) return;
     await state.store.wipe();
     localStorage.removeItem("mm_local_active");
     location.reload();
@@ -1568,6 +1671,44 @@ function openModal(title, bodyHtml) {
   drawIcons();
 }
 function closeModal() { $("#modal-overlay").classList.add("hidden"); }
+
+// Belső szövegbeviteli dialógus (a natív prompt helyett – nem mutatja a domaint)
+function askText({ title, label, placeholder = "", value = "", okText = "OK", inputmode = "" }) {
+  return new Promise((resolve) => {
+    openModal(title, `
+      <div class="field"><label>${esc(label)}</label>
+        <input type="text" id="ask-input" placeholder="${esc(placeholder)}" value="${esc(value)}" ${inputmode ? `inputmode="${inputmode}"` : ""} autocomplete="off"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="ask-cancel">Mégse</button>
+        <button class="btn btn-primary" id="ask-ok">${esc(okText)}</button>
+      </div>
+    `);
+    const restore = () => { $("#modal-close").onclick = closeModal; };
+    const done = (v) => { restore(); closeModal(); resolve(v); };
+    $("#modal-close").onclick = () => done(null);
+    $("#ask-ok").onclick = () => done(($("#ask-input").value || "").trim());
+    $("#ask-cancel").onclick = () => done(null);
+    $("#ask-input").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); done(($("#ask-input").value || "").trim()); } };
+    setTimeout(() => $("#ask-input").focus(), 120);
+  });
+}
+
+// Belső megerősítő dialógus (a natív confirm helyett)
+function askConfirm({ title = "Megerősítés", message, okText = "OK", danger = false }) {
+  return new Promise((resolve) => {
+    openModal(title, `
+      <p style="font-size:14.5px;line-height:1.55;margin-bottom:18px">${message}</p>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="cf-cancel">Mégse</button>
+        <button class="btn ${danger ? "btn-danger" : "btn-primary"}" id="cf-ok">${esc(okText)}</button>
+      </div>
+    `);
+    const done = (v) => { $("#modal-close").onclick = closeModal; closeModal(); resolve(v); };
+    $("#modal-close").onclick = () => done(false);
+    $("#cf-ok").onclick = () => done(true);
+    $("#cf-cancel").onclick = () => done(false);
+  });
+}
 
 // Üdvözlő / funkció-összefoglaló (regisztráció vagy első indítás után, egyszer)
 function maybeShowWelcome() {
@@ -1610,7 +1751,7 @@ function openTxModal(tx = null, preset = {}) {
     </div>
     <div class="field">
       <div class="amount-wrap">
-        <input type="text" id="tx-amount" inputmode="decimal" placeholder="0" value="${tx ? baseToDisplay(tx.amount) : ""}" autocomplete="off">
+        <input type="text" id="tx-amount" inputmode="decimal" placeholder="0" value="${tx ? baseToDisplay(tx.amount) : esc(preset.amountText || "")}" autocomplete="off">
         <span class="amount-cur ${curMeta.position === "prefix" ? "prefix" : ""}">${curMeta.symbol}</span>
       </div>
       <div class="quick-amounts">
@@ -1621,7 +1762,7 @@ function openTxModal(tx = null, preset = {}) {
     </div>
     <div class="field">
       <label>Megnevezés</label>
-      <input type="text" id="tx-note" placeholder="Pl. heti bevásárlás" value="${esc(tx?.note || "")}" list="note-suggestions" autocomplete="off">
+      <input type="text" id="tx-note" placeholder="Pl. heti bevásárlás" value="${esc(tx?.note || preset.note || "")}" list="note-suggestions" autocomplete="off">
       <datalist id="note-suggestions">${noteSuggestions.map(n => `<option value="${esc(n)}">`).join("")}</datalist>
       <p class="field-hint" id="cat-suggest-hint" style="display:none"></p>
     </div>
@@ -1629,6 +1770,7 @@ function openTxModal(tx = null, preset = {}) {
       <label>Kategória</label>
       <div class="cat-grid" id="tx-cat-grid">
         ${state.cache.categories.map(c => `<button type="button" class="cat-pick ${c.id === categoryId ? "active" : ""}" data-cat="${c.id}">${ic(c.icon)}<span>${esc(c.name)}</span></button>`).join("")}
+        <button type="button" class="cat-pick cat-add" id="tx-cat-add">${ic("plus")}<span>Új</span></button>
       </div>
     </div>
     <div class="field" id="tx-goal-field" style="${type === "saving" ? "" : "display:none"}">
@@ -1641,7 +1783,13 @@ function openTxModal(tx = null, preset = {}) {
     </div>` : ""}
     <div class="field">
       <label>Dátum</label>
-      <input type="date" id="tx-date" value="${tx?.date || todayStr()}">
+      <div class="date-input-wrap">
+        <input type="text" id="tx-date-text" inputmode="numeric" placeholder="ÉÉÉÉ-HH-NN" maxlength="10" autocomplete="off" value="${tx?.date || preset.date || todayStr()}">
+        <label class="date-cal-btn" aria-label="Naptár megnyitása">${ic("calendar")}
+          <input type="date" id="tx-date" value="${tx?.date || preset.date || todayStr()}">
+        </label>
+      </div>
+      <p class="field-hint" id="tx-date-guide"></p>
       <p class="field-hint" id="tx-future-hint" style="display:none">Jövőbeli dátum – <b>tervezett</b> tételként kerül be: a hó végi egyenlegbe beleszámít, a statisztikába még nem. Később a tételsoron a pipa gombbal jelölheted teljesítettnek.</p>
     </div>
     <div class="field">
@@ -1655,6 +1803,8 @@ function openTxModal(tx = null, preset = {}) {
           </select>
         </div>
         <p class="field-hint">Az első alkalom a fent megadott <b>dátum</b>. Pl. „minden 3 hét" = 3 hetente. Alapértelmezés: minden 1 hónap (havonta).</p>
+        <label class="check-row" style="margin-top:6px"><input type="checkbox" id="tx-recur-manual" ${(linkedRec && (linkedRec.auto_post === false || linkedRec.auto_post === "false")) ? "checked" : ""}> ${ic("circle-check-big")} Kézi pipálás (nem automatikus levonás)</label>
+        <p class="field-hint">Bekapcsolva: az esedékes tételek <b>tervezettként</b> (pipálandó) jelennek meg – a következő hónapban is –, és neked kell kipipálnod, amikor ténylegesen levonták. Kikapcsolva: automatikusan könyvelődik.</p>
       </div>
     </div>
     <div class="modal-actions">
@@ -1681,10 +1831,16 @@ function openTxModal(tx = null, preset = {}) {
   if (clearBtn) clearBtn.onclick = () => { $("#tx-amount").value = ""; $("#tx-amount").focus(); };
 
   // Kategóriaválasztó
-  $("#tx-cat-grid")?.querySelectorAll(".cat-pick").forEach(b => b.onclick = () => {
+  $("#tx-cat-grid")?.querySelectorAll(".cat-pick:not(.cat-add)").forEach(b => b.onclick = () => {
     categoryId = b.dataset.cat;
-    $("#tx-cat-grid").querySelectorAll(".cat-pick").forEach(x => x.classList.toggle("active", x === b));
+    $("#tx-cat-grid").querySelectorAll(".cat-pick:not(.cat-add)").forEach(x => x.classList.toggle("active", x === b));
   });
+  // Új kategória közvetlenül a tétel-űrlapról (a már beírt összeg/megnevezés/dátum megmarad)
+  const catAddBtn = $("#tx-cat-add");
+  if (catAddBtn) catAddBtn.onclick = () => {
+    const draft = { type, amountText: $("#tx-amount").value, note: $("#tx-note").value, date: $("#tx-date").value };
+    openCategoryModal({ onCreated: (cat) => openTxModal(null, { type: draft.type, category_id: cat.id, amountText: draft.amountText, note: draft.note, date: draft.date }) });
+  };
 
   // Okos kategória-javaslat a megnevezés alapján
   $("#tx-note").oninput = (e) => {
@@ -1703,13 +1859,57 @@ function openTxModal(tx = null, preset = {}) {
     } else hint.style.display = "none";
   };
 
-  // Jövőbeli dátum jelzése
+  // Dátum: közvetlen gépelés + naptár, lépésenkénti súgóval (év → hónap → nap)
+  const dateText = $("#tx-date-text");
+  const dateNative = $("#tx-date");
+  const dateGuide = $("#tx-date-guide");
+  const MONTHS_HU = ["január", "február", "március", "április", "május", "június", "július", "augusztus", "szeptember", "október", "november", "december"];
+  const pad2 = (n) => String(n).padStart(2, "0");
+
   const updateFutureHint = () => {
-    const d = $("#tx-date").value;
+    const d = dateNative.value;
     $("#tx-future-hint").style.display = (d && isFutureDate(d)) ? "block" : "none";
   };
-  $("#tx-date").onchange = updateFutureHint;
-  updateFutureHint();
+
+  function refreshDateGuide() {
+    const digits = (dateText.value.match(/\d/g) || []).join("").slice(0, 8);
+    dateGuide.style.color = "";
+    if (digits.length < 8) {
+      dateNative.value = "";
+      updateFutureHint();
+      if (digits.length === 0) dateGuide.textContent = "Írd be a dátumot számokkal: előbb az évet, majd a hónapot, végül a napot.";
+      else if (digits.length < 4) dateGuide.textContent = `Év (${digits}…) — még ${4 - digits.length} számjegy.`;
+      else if (digits.length < 6) dateGuide.textContent = "Most a hónap következik (01–12).";
+      else dateGuide.textContent = "Most a nap következik (01–31).";
+      return;
+    }
+    const y = +digits.slice(0, 4), m = +digits.slice(4, 6), d = +digits.slice(6, 8);
+    const dt = new Date(y, m - 1, d);
+    const ok = m >= 1 && m <= 12 && d >= 1 && dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d;
+    if (!ok) {
+      dateNative.value = ""; updateFutureHint();
+      dateGuide.style.color = "var(--danger)";
+      dateGuide.textContent = "Érvénytelen dátum — ellenőrizd a hónapot (01–12) és a napot.";
+      return;
+    }
+    dateNative.value = `${y}-${pad2(m)}-${pad2(d)}`;
+    dateGuide.style.color = "var(--green)";
+    dateGuide.textContent = `${y}. ${MONTHS_HU[m - 1]} ${d}.`;
+    updateFutureHint();
+  }
+
+  function maskDateInput() {
+    const digits = (dateText.value.match(/\d/g) || []).join("").slice(0, 8);
+    let out = digits.slice(0, 4);
+    if (digits.length > 4) out += "-" + digits.slice(4, 6);
+    if (digits.length > 6) out += "-" + digits.slice(6, 8);
+    dateText.value = out;
+    refreshDateGuide();
+  }
+
+  dateText.oninput = maskDateInput;
+  dateNative.onchange = () => { dateText.value = dateNative.value; refreshDateGuide(); };
+  maskDateInput();
 
   // Ismétlődés kapcsoló
   $("#tx-recurring").onchange = (e) => {
@@ -1726,6 +1926,7 @@ function openTxModal(tx = null, preset = {}) {
     const recurOn = $("#tx-recurring")?.checked;
     const unit = $("#tx-recur-unit")?.value || "month";
     const count = Math.max(1, parseInt($("#tx-recur-count")?.value, 10) || 1);
+    const recurManual = $("#tx-recur-manual")?.checked || false;
     const row = {
       type, amount, note, date, pending,
       category_id: type === "expense" ? categoryId : null,
@@ -1741,7 +1942,7 @@ function openTxModal(tx = null, preset = {}) {
           // meglévő sorozat frissítése (a jövőbeli könyveléseket érinti)
           await state.store.update("recurring", linkedRec.id, {
             name: note || linkedRec.name, amount, type, category_id: row.category_id,
-            interval_unit: unit, interval_count: count, active: true,
+            interval_unit: unit, interval_count: count, active: true, auto_post: !recurManual,
           });
           row.recurring_id = linkedRec.id;
         } else if (recurOn && !linkedRec) {
@@ -1749,7 +1950,7 @@ function openTxModal(tx = null, preset = {}) {
           const rec = await state.store.insert("recurring", {
             name: note || (type === "income" ? "Bevétel" : "Kiadás"), amount, type,
             category_id: row.category_id, interval_unit: unit, interval_count: count,
-            anchor_date: date, active: true,
+            anchor_date: date, active: true, auto_post: !recurManual,
           });
           row.recurring_id = rec.id;
         } else if (!recurOn && linkedRec) {
@@ -1772,7 +1973,7 @@ function openTxModal(tx = null, preset = {}) {
           const rec = await state.store.insert("recurring", {
             name: note || (type === "income" ? "Bevétel" : "Kiadás"), amount, type,
             category_id: row.category_id, interval_unit: unit, interval_count: count,
-            anchor_date: date, active: true,
+            anchor_date: date, active: true, auto_post: !recurManual,
           });
           row.recurring_id = rec.id;
         }
@@ -1790,7 +1991,7 @@ function openTxModal(tx = null, preset = {}) {
   // Törlés
   const delBtn = $("#tx-delete");
   if (delBtn) delBtn.onclick = async () => {
-    if (!confirm("Biztosan törlöd ezt a tételt?")) return;
+    if (!(await askConfirm({ title: "Tétel törlése", message: "Biztosan törlöd ezt a tételt?", okText: "Törlés", danger: true }))) return;
     await state.store.remove("transactions", tx.id);
     await refreshCache(); closeModal(); renderView(); toast("Tétel törölve");
   };
@@ -1868,7 +2069,7 @@ function openGoalModal(goal = null) {
 }
 
 // ---------- Kategória modál ----------
-function openCategoryModal() {
+function openCategoryModal(opts = {}) {
   const icons = ["house", "shopping-cart", "bus", "car", "party-popper", "pill", "shirt", "smartphone", "package", "gamepad-2", "book-open", "coffee", "scissors", "gift", "dumbbell", "plane", "graduation-cap", "heart", "utensils", "wifi", "dog", "cat", "music", "briefcase", "fuel", "baby", "wrench", "stethoscope", "cigarette", "wine", "bike", "train-front", "shopping-bag", "hand-coins", "piggy-bank", "tv"];
   const colors = ["#2563eb", "#16a34a", "#d97706", "#9333ea", "#dc2626", "#0891b2", "#4f46e5", "#64748b", "#db2777", "#65a30d", "#ea580c", "#0d9488"];
   openModal("Új kategória", `
@@ -1897,11 +2098,14 @@ function openCategoryModal() {
   $("#cat-save").onclick = async () => {
     const name = $("#cat-name").value.trim();
     if (!name) { toast("Adj nevet a kategóriának!"); return; }
-    await state.store.insert("categories", {
+    const created = await state.store.insert("categories", {
       name, icon, color,
       budget: parseAmountToBase($("#cat-budget").value) || 0, sort: state.cache.categories.length,
     });
-    await refreshCache(); closeModal(); renderView(); toast("Kategória létrehozva", "check");
+    await refreshCache();
+    toast("Kategória létrehozva", "check");
+    if (opts.onCreated) opts.onCreated(created);
+    else { closeModal(); renderView(); }
   };
 }
 
@@ -1931,6 +2135,10 @@ function openRecurringModal() {
     <div class="field"><label>Első alkalom / kezdő dátum</label>
       <input type="date" id="rec-anchor" value="${todayStr()}">
       <p class="field-hint">Innen indul az ismétlődés. Havi fizetésnél állítsd arra a napra, amikor érkezik (pl. a hónap 5-e).</p></div>
+    <div class="field" style="margin-bottom:4px">
+      <label class="check-row"><input type="checkbox" id="rec-manual"> ${ic("circle-check-big")} Kézi pipálás (nem automatikus levonás)</label>
+      <p class="field-hint">Bekapcsolva: a tételek <b>tervezettként</b> (pipálandó) jelennek meg – a következő hónapban is –, és te pipálod ki, amikor ténylegesen levonták. Kikapcsolva: automatikusan könyvelődik.</p>
+    </div>
     <div class="modal-actions"><button class="btn btn-primary" id="rec-save">Hozzáadás</button></div>
   `);
   let type = "expense";
@@ -1950,6 +2158,7 @@ function openRecurringModal() {
       name, amount, type, active: true,
       category_id: type === "expense" ? $("#rec-cat").value : null,
       interval_unit: unit, interval_count: count, anchor_date: anchor,
+      auto_post: !($("#rec-manual")?.checked),
     });
     await refreshCache();
     await applyRecurring();

@@ -298,14 +298,23 @@ input, select, textarea { font-family: inherit; font-size: 16px; color: var(--te
 .budget-row-name span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .budget-row-vals { color: var(--text-muted); font-size: 13px; white-space: nowrap; }
 .budget-row-vals b { color: var(--text); }
-.progress { height: 8px; background: var(--surface-2); border-radius: 99px; overflow: hidden; }
+.progress { height: 8px; background: var(--surface-2); border-radius: 99px; overflow: hidden; position: relative; }
+.avg-marker { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--text); opacity: .45; transform: translateX(-1px); pointer-events: none; z-index: 2; }
+.avg-legend { display: flex; align-items: center; gap: 4px; margin: -2px 0 12px; }
+.avg-legend .lucide { width: 15px; height: 15px; opacity: .55; }
 .progress-fill { height: 100%; border-radius: 99px; background: var(--primary); width: 0; transition: width .6s cubic-bezier(.22,1,.36,1); }
 .progress-fill.warn { background: var(--amber); }
 .progress-fill.over { background: var(--red); }
 .progress-fill.ok { background: var(--green); }
+.goal-progress { display: flex; }
+.goal-progress .progress-fill { border-radius: 0; }
+.goal-progress .progress-fill.used { background: var(--green); }
+.goal-progress .progress-fill.avail { background: var(--primary); }
 
 /* ============ Transaction list ============ */
 .tx-group-date { font-size: 12px; font-weight: 700; color: var(--text-faint); text-transform: uppercase; letter-spacing: .5px; margin: 18px 0 9px; }
+.tx-group-date.overdue { color: var(--amber); display: flex; align-items: center; gap: 6px; }
+.tx-group-date.overdue .lucide { width: 14px; height: 14px; }
 .tx-item { display: flex; align-items: center; gap: 13px; padding: 12px; background: var(--surface); border-radius: 16px; border: 1px solid var(--border); margin-bottom: 9px; transition: transform .12s ease, box-shadow .15s ease; cursor: pointer; }
 .tx-item:hover { box-shadow: var(--shadow); transform: translateY(-1px); }
 .tx-item:active { transform: scale(.99); }
@@ -428,6 +437,17 @@ input, select, textarea { font-family: inherit; font-size: 16px; color: var(--te
 .cat-pick .lucide { width: 22px; height: 22px; }
 .cat-pick.active { border-color: var(--primary); background: var(--primary-soft); color: var(--primary); }
 .cat-pick.icononly { padding: 13px 4px; }
+.cat-pick.cat-add { border-style: dashed; color: var(--primary); }
+.cat-pick.cat-add:hover { border-color: var(--primary); background: var(--primary-soft); }
+.cat-pick.cat-add .lucide { width: 20px; height: 20px; }
+
+/* Dátum: gépelhető mező + naptár ikon */
+.date-input-wrap { position: relative; display: flex; align-items: center; }
+.date-input-wrap > input[type="text"] { flex: 1; width: 100%; padding-right: 48px; }
+.date-cal-btn { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; border-radius: 10px; color: var(--text-muted); cursor: pointer; overflow: hidden; transition: all .15s; }
+.date-cal-btn:hover { background: var(--primary-soft); color: var(--primary); }
+.date-cal-btn .lucide { width: 19px; height: 19px; pointer-events: none; }
+.date-cal-btn input[type="date"] { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; opacity: 0; cursor: pointer; }
 .color-grid { display: flex; flex-wrap: wrap; gap: 9px; }
 .color-pick { width: 34px; height: 34px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; transition: transform .12s; box-shadow: inset 0 0 0 2px var(--surface); }
 .color-pick:hover { transform: scale(1.08); }

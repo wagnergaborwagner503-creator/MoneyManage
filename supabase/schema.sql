@@ -89,6 +89,7 @@ create table if not exists public.recurring (
   interval_count integer default 1 check (interval_count >= 1),
   anchor_date    date,        -- első előfordulás dátuma (innen számoljuk az ismétlődést)
   active         boolean default true,
+  auto_post      boolean default true,    -- false = kézi pipálás (a könyvelt előfordulás tervezett/pending marad, amíg ki nem pipálod)
   created_at     timestamptz default now()
 );
 
@@ -99,6 +100,7 @@ alter table public.transactions add column if not exists from_savings boolean de
 alter table public.recurring    add column if not exists interval_unit  text    default 'month';
 alter table public.recurring    add column if not exists interval_count integer default 1;
 alter table public.recurring    add column if not exists anchor_date    date;
+alter table public.recurring    add column if not exists auto_post      boolean default true;
 
 -- ---------- Visszajelzések / tippek ----------
 -- Ide kerülnek az alkalmazásból küldött visszajelzések.
